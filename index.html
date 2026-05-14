@@ -1128,7 +1128,7 @@
                 const groups = resolveAnalysisGroups(data.headers, coreIndexes);
                 const { referenceMeans, groupMeans } = calculateReferenceMeans(vidMeans, groups);
                 const vidStats = calculateVidStats(vidMeans, referenceMeans);
-                const recommendations = calculateOffsets(vidMeans, referenceMeans, mvStep, currentOffsets, vidStats.maxDelta);
+                const recommendations = calculateOffsets(vidMeans, referenceMeans, mvStep, currentOffsets, vidStats);
 
                 displayResults(resultsDiv, {
                     totalRows: data.rows.length,
@@ -1193,14 +1193,31 @@
             return denominator === 0 ? 0 : numerator / denominator;
         }
 
-        function calculateOffsets(vidMeans, referenceMeans, mvStep, currentOffsets, maxDelta) {
+        function calculateOffsets(vidMeans, referenceMeans, mvStep, currentOffsets, vidStats) {
             const recommendations = {};
+            if (vidStats.stdDev <= mvStep) {
+                Object.entries(vidMeans).forEach(([col]) => {
+                    const coreIdx = getCoreIndexFromVidColumn(col);
+                    if (coreIdx !== null) recommendations[coreIdx] = currentOffsets[coreIdx] || 0;
+                });
+                return recommendations;
+            }
+
+            const anchorCompensation = calculateAnchorCompensation(
+                vidMeans,
+                referenceMeans,
+                currentOffsets,
+                mvStep,
+                vidStats
+            );
 
             Object.entries(vidMeans).forEach(([col, vid]) => {
                 const coreIdx = getCoreIndexFromVidColumn(col);
                 if (coreIdx !== null && Number.isFinite(referenceMeans[coreIdx])) {
                     const deltaMv = (vid - referenceMeans[coreIdx]) * 1000;
-                    const delta = calculateAdaptiveStep(deltaMv, mvStep, maxDelta);
+                    const adjustedDeltaMv = deltaMv > 0 ? deltaMv + anchorCompensation : deltaMv;
+                    const convergenceDelta = Math.max(vidStats.stdDev, vidStats.maxHighDelta);
+                    const delta = calculateAdaptiveStep(adjustedDeltaMv, mvStep, convergenceDelta);
                     const baseOffset = currentOffsets[coreIdx] || 0;
                     let recommended = baseOffset + delta;
 
@@ -1212,12 +1229,32 @@
             return recommendations;
         }
 
-        function calculateAdaptiveStep(deltaMv, mvStep, maxDelta) {
+        function calculateAnchorCompensation(vidMeans, referenceMeans, currentOffsets, mvStep, vidStats) {
+            if (vidStats.stdDev < mvStep * 2) return 0;
+
+            const fixedLowDeltas = Object.entries(vidMeans)
+                .map(([col, vid]) => {
+                    const coreIdx = getCoreIndexFromVidColumn(col);
+                    if (coreIdx === null || !Number.isFinite(referenceMeans[coreIdx])) return null;
+
+                    const currentOffset = currentOffsets[coreIdx] || 0;
+                    const deltaMv = (vid - referenceMeans[coreIdx]) * 1000;
+                    return currentOffset >= 0 && deltaMv < -mvStep * 0.5 ? deltaMv : null;
+                })
+                .filter(Number.isFinite);
+
+            if (fixedLowDeltas.length === 0) return 0;
+
+            const meanFixedLow = fixedLowDeltas.reduce((sum, delta) => sum + delta, 0) / fixedLowDeltas.length;
+            return Math.min(mvStep * 4, Math.abs(meanFixedLow) * 0.6);
+        }
+
+        function calculateAdaptiveStep(deltaMv, mvStep, convergenceDelta) {
             const magnitude = Math.abs(deltaMv);
             if (magnitude < mvStep * 0.5) return 0;
 
             const rawSteps = magnitude / mvStep;
-            const stillConverging = maxDelta >= mvStep;
+            const stillConverging = convergenceDelta >= mvStep;
             const steps = stillConverging ? Math.max(1, Math.round(rawSteps)) : Math.floor(rawSteps);
 
             if (steps < 1) return 0;

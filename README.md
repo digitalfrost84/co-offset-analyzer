@@ -11,6 +11,7 @@ The analyzer runs entirely in your browser. CSV data is processed locally and is
 - Auto-detects CCD groups when HWiNFO exposes `CoreN (CCDx)` temperature columns
 - Supports whole-CPU or per-CCD analysis scopes
 - Produces copy-friendly per-core CO recommendations
+- Uses offset-aware convergence logic to avoid chasing low-VID cores that are already at `0`
 - Works offline as a standalone `index.html`
 
 ## Quick Start
@@ -50,12 +51,14 @@ You are usually close enough when:
 
 Tiny one-step changes can be measurement noise. If a core asks for the same one-step change across multiple fresh logs, it is more likely worth applying.
 
+The analyzer now stops recommending further harmonization changes once the VID spread is already within the configured mV-per-step target. This avoids unnecessary one-step churn after the useful VID alignment target has been reached.
+
 ### Conservative Iteration
 
 If you want fewer iterations:
 
 1. Apply the first recommendation from `0`.
-2. On later passes, ignore one-step changes unless the same core repeats the same direction.
+2. On later passes, ignore one-step changes unless the same core repeats the same direction and the VID spread is still above target.
 3. Stop tuning and begin stability testing once the tool mostly recommends no change.
 
 ## HWiNFO64 Logging Tips
@@ -76,6 +79,14 @@ The tool filters log rows by CPU core current, calculates the average VID for ea
 - `Whole CPU`: each core is compared against the global CPU mean
 
 The VID delta is converted into CO steps using the configured mV-per-step value, then added to your current offsets.
+
+The recommendation logic is offset-aware:
+
+- If VID standard deviation is already at or below the configured mV-per-step target, current offsets are preserved.
+- Low-VID cores at offset `0` are treated as fixed anchors because the tool cannot recommend positive CO offsets.
+- During wide-spread early passes, high-VID cores are compensated more aggressively when fixed low-VID anchors would otherwise cause slow one-step convergence.
+
+The default `3.0 mV` per CO step is intentionally conservative and should work as a broad starting point across CPUs. You can adjust it if repeated before/after logs show your CPU responds differently.
 
 ## Safety Notes
 
