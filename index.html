@@ -1,0 +1,1217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CO Offset Analyzer</title>
+    <style>
+        :root {
+            color-scheme: dark;
+            --bg: #111418;
+            --panel: #191f26;
+            --panel-soft: #202833;
+            --panel-strong: #263241;
+            --text: #eef3f7;
+            --muted: #9eacba;
+            --line: #33404f;
+            --accent: #52b788;
+            --accent-strong: #3a9f72;
+            --warn: #f2b84b;
+            --danger: #ff6b6b;
+            --shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            background:
+                radial-gradient(circle at top left, rgba(82, 183, 136, 0.16), transparent 34rem),
+                linear-gradient(135deg, #0f1216 0%, #151b21 52%, #12161b 100%);
+            color: var(--text);
+            font-family: Inter, "Segoe UI", Arial, sans-serif;
+            line-height: 1.45;
+        }
+
+        .app {
+            width: min(1440px, calc(100% - 32px));
+            margin: 0 auto;
+            padding: 28px 0 44px;
+        }
+
+        .topbar {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            gap: 20px;
+            margin-bottom: 22px;
+        }
+
+        .eyebrow {
+            margin: 0 0 6px;
+            color: var(--accent);
+            font-size: 12px;
+            font-weight: 800;
+            letter-spacing: 0;
+            text-transform: uppercase;
+        }
+
+        h1,
+        h2,
+        h3,
+        p {
+            margin-top: 0;
+        }
+
+        h1 {
+            margin-bottom: 0;
+            font-size: clamp(28px, 4vw, 48px);
+            letter-spacing: 0;
+            line-height: 1.05;
+        }
+
+        h2 {
+            margin-bottom: 16px;
+            font-size: 22px;
+        }
+
+        h3 {
+            margin-bottom: 12px;
+            font-size: 16px;
+        }
+
+        .status-pill {
+            display: inline-flex;
+            align-items: center;
+            min-height: 34px;
+            padding: 7px 12px;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            background: rgba(25, 31, 38, 0.82);
+            color: var(--muted);
+            font-size: 13px;
+            white-space: nowrap;
+        }
+
+        .layout {
+            display: grid;
+            grid-template-columns: minmax(320px, 430px) minmax(0, 1fr);
+            gap: 18px;
+            align-items: start;
+        }
+
+        .panel {
+            background: rgba(25, 31, 38, 0.94);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 8px;
+            box-shadow: var(--shadow);
+        }
+
+        .controls {
+            position: sticky;
+            top: 18px;
+            padding: 20px;
+        }
+
+        .results-panel {
+            min-height: 560px;
+            padding: 20px;
+        }
+
+        .section {
+            padding: 16px 0;
+            border-top: 1px solid var(--line);
+        }
+
+        .section:first-of-type {
+            padding-top: 0;
+            border-top: 0;
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 7px;
+            color: #c8d2dc;
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        input[type="number"],
+        input[type="file"],
+        textarea,
+        select {
+            width: 100%;
+            min-height: 42px;
+            padding: 10px 11px;
+            border: 1px solid var(--line);
+            border-radius: 6px;
+            background: #10151b;
+            color: var(--text);
+            font: inherit;
+            outline: none;
+            transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+        }
+
+        input[type="number"]:focus,
+        input[type="file"]:focus,
+        textarea:focus,
+        select:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(82, 183, 136, 0.18);
+        }
+
+        input[type="file"] {
+            padding: 8px;
+            color: var(--muted);
+        }
+
+        textarea {
+            min-height: 188px;
+            resize: vertical;
+            font-family: "Cascadia Mono", Consolas, monospace;
+            font-size: 12px;
+        }
+
+        .field-note {
+            margin: 7px 0 0;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .offset-toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .offset-inputs {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+            gap: 9px;
+        }
+
+        .offset-input {
+            padding: 10px;
+            border: 1px solid var(--line);
+            border-radius: 6px;
+            background: var(--panel-soft);
+        }
+
+        .offset-input label {
+            margin-bottom: 6px;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .offset-input input {
+            min-height: 36px;
+            margin: 0;
+            text-align: center;
+            font-weight: 800;
+        }
+
+        .actions {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 10px;
+            margin-top: 16px;
+        }
+
+        button {
+            min-height: 42px;
+            border: 0;
+            border-radius: 6px;
+            cursor: pointer;
+            font: inherit;
+            font-weight: 800;
+            transition: transform 0.12s ease, background 0.16s ease, border-color 0.16s ease;
+        }
+
+        button:hover {
+            transform: translateY(-1px);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        .primary-btn {
+            background: var(--accent);
+            color: #08110d;
+        }
+
+        .primary-btn:hover {
+            background: #68c99c;
+        }
+
+        .ghost-btn {
+            padding: 0 14px;
+            border: 1px solid var(--line);
+            background: transparent;
+            color: var(--text);
+        }
+
+        .ghost-btn:hover {
+            border-color: var(--accent);
+            background: rgba(82, 183, 136, 0.1);
+        }
+
+        .empty-state {
+            display: grid;
+            place-items: center;
+            min-height: 516px;
+            border: 1px dashed var(--line);
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.02);
+            text-align: center;
+        }
+
+        .empty-state-inner {
+            width: min(440px, 100%);
+            padding: 22px;
+        }
+
+        .empty-icon {
+            display: inline-grid;
+            place-items: center;
+            width: 58px;
+            height: 58px;
+            margin-bottom: 16px;
+            border-radius: 50%;
+            background: rgba(82, 183, 136, 0.14);
+            color: var(--accent);
+            font-size: 28px;
+            font-weight: 900;
+        }
+
+        .empty-state p {
+            margin-bottom: 0;
+            color: var(--muted);
+        }
+
+        .message {
+            padding: 14px 15px;
+            border-radius: 6px;
+            border: 1px solid;
+            font-weight: 700;
+        }
+
+        .message.error {
+            border-color: rgba(255, 107, 107, 0.45);
+            background: rgba(255, 107, 107, 0.12);
+            color: #ffd2d2;
+        }
+
+        .message.success {
+            border-color: rgba(82, 183, 136, 0.45);
+            background: rgba(82, 183, 136, 0.12);
+            color: #c9f3dc;
+        }
+
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(130px, 1fr));
+            gap: 10px;
+            margin-bottom: 18px;
+        }
+
+        .metric {
+            padding: 14px;
+            border: 1px solid var(--line);
+            border-radius: 6px;
+            background: var(--panel-soft);
+        }
+
+        .metric-label {
+            margin-bottom: 6px;
+            color: var(--muted);
+            font-size: 12px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0;
+        }
+
+        .metric-value {
+            font-size: 24px;
+            font-weight: 900;
+            line-height: 1.1;
+        }
+
+        .metric-unit {
+            color: var(--muted);
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        .result-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1.1fr) minmax(260px, 0.9fr);
+            gap: 14px;
+        }
+
+        .result-card {
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: var(--panel-soft);
+            overflow: hidden;
+        }
+
+        .card-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 13px 14px;
+            border-bottom: 1px solid var(--line);
+            background: var(--panel-strong);
+        }
+
+        .card-head h3 {
+            margin: 0;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th,
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            text-align: right;
+            font-size: 13px;
+        }
+
+        th:first-child,
+        td:first-child {
+            text-align: left;
+        }
+
+        th {
+            color: var(--muted);
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0;
+        }
+
+        tr:last-child td {
+            border-bottom: 0;
+        }
+
+        .positive {
+            color: #ffb4a8;
+        }
+
+        .negative {
+            color: #a9e8c7;
+        }
+
+        .recommendation-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+            gap: 9px;
+            padding: 14px;
+        }
+
+        .rec-chip {
+            padding: 11px;
+            border: 1px solid rgba(82, 183, 136, 0.28);
+            border-radius: 6px;
+            background: rgba(82, 183, 136, 0.1);
+        }
+
+        .rec-chip strong {
+            display: block;
+            margin-bottom: 4px;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .rec-value {
+            font-size: 24px;
+            font-weight: 900;
+        }
+
+        .rec-change {
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .copy-box {
+            margin: 0 14px 14px;
+            padding: 12px;
+            border: 1px solid var(--line);
+            border-radius: 6px;
+            background: #10151b;
+            color: #d8e3eb;
+            font-family: "Cascadia Mono", Consolas, monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+        }
+
+        .file-line {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+
+        #fileName {
+            color: var(--muted);
+            font-size: 12px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        @media (max-width: 980px) {
+            .layout,
+            .result-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .controls {
+                position: static;
+            }
+
+            .metrics {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+        }
+
+        @media (max-width: 620px) {
+            .app {
+                width: min(100% - 20px, 1440px);
+                padding-top: 16px;
+            }
+
+            .topbar,
+            .offset-toolbar {
+                align-items: stretch;
+                flex-direction: column;
+            }
+
+            .status-pill {
+                width: 100%;
+                justify-content: center;
+            }
+
+            .form-grid,
+            .metrics,
+            .actions {
+                grid-template-columns: 1fr;
+            }
+
+            .metric-value,
+            .rec-value {
+                font-size: 21px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <main class="app">
+        <header class="topbar">
+            <div>
+                <p class="eyebrow">Curve Optimizer</p>
+                <h1>CO Offset Analyzer</h1>
+            </div>
+            <div id="status" class="status-pill">Waiting for CSV data</div>
+        </header>
+
+        <div class="layout">
+            <section class="panel controls" aria-label="Analyzer controls">
+                <div class="section">
+                    <h2>Inputs</h2>
+                    <div class="form-grid">
+                        <div>
+                            <label for="coreCount">Core count</label>
+                            <select id="coreCount" onchange="updateCoreCountMode()">
+                                <option value="auto" selected>Auto-detect</option>
+                                <option value="4">4 cores</option>
+                                <option value="6">6 cores</option>
+                                <option value="8">8 cores</option>
+                                <option value="10">10 cores</option>
+                                <option value="12">12 cores</option>
+                                <option value="14">14 cores</option>
+                                <option value="16">16 cores</option>
+                                <option value="24">24 cores</option>
+                                <option value="32">32 cores</option>
+                            </select>
+                            <p id="coreDetect" class="field-note">Auto: waiting for CSV</p>
+                        </div>
+                        <div>
+                            <label for="minCurrent">Minimum current (A)</label>
+                            <input type="number" id="minCurrent" value="70" step="0.1">
+                        </div>
+                        <div>
+                            <label for="mvStep">mV per CO step</label>
+                            <input type="number" id="mvStep" value="3.0" step="0.1">
+                        </div>
+                        <div>
+                            <label for="analysisScope">Analysis scope</label>
+                            <select id="analysisScope" onchange="rerunIfReady()">
+                                <option value="auto" selected>Auto CCD</option>
+                                <option value="whole">Whole CPU</option>
+                            </select>
+                            <p id="scopeDetect" class="field-note">Auto: waiting for CSV</p>
+                        </div>
+                        <div>
+                            <label for="csvFile">HWiNFO64 CSV file</label>
+                            <input type="file" id="csvFile" accept=".csv" onchange="handleFileUpload(event)">
+                        </div>
+                    </div>
+                    <div class="file-line">
+                        <p class="field-note">Upload a log or paste CSV content below.</p>
+                        <span id="fileName"></span>
+                    </div>
+                </div>
+
+                <div class="section">
+                    <div class="offset-toolbar">
+                        <h3>Current CO offsets</h3>
+                        <button type="button" class="ghost-btn" onclick="resetOffsets()">Reset</button>
+                    </div>
+                    <div id="offsetInputs" class="offset-inputs"></div>
+                </div>
+
+                <div class="section">
+                    <label for="csvText">CSV content</label>
+                    <textarea id="csvText" placeholder="Paste HWiNFO64 CSV data here..."></textarea>
+                    <div class="actions">
+                        <button class="primary-btn" onclick="analyzeData()">Analyze</button>
+                        <button type="button" class="ghost-btn" onclick="clearCsv()">Clear</button>
+                    </div>
+                </div>
+            </section>
+
+            <section class="panel results-panel" aria-label="Analyzer results">
+                <div id="results" class="empty-state">
+                    <div class="empty-state-inner">
+                        <div class="empty-icon">CO</div>
+                        <h2>Ready to analyze</h2>
+                        <p>Recommended per-core offsets will appear here after a valid HWiNFO64 CSV is loaded.</p>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <script>
+        let detectedCoreCount = null;
+        let detectTimer = null;
+        let autoAnalyzeTimer = null;
+
+        updateOffsetInputs();
+        document.getElementById('csvText').addEventListener('input', () => {
+            clearTimeout(detectTimer);
+            detectTimer = setTimeout(() => {
+                const csvText = document.getElementById('csvText').value;
+                updateDetectedCoreCountFromText(csvText);
+                scheduleAutoAnalyze(csvText);
+            }, 180);
+        });
+
+        function setStatus(text) {
+            document.getElementById('status').textContent = text;
+        }
+
+        function rerunIfReady() {
+            updateScopeLabel(null);
+            const csvText = document.getElementById('csvText').value;
+            if (canAnalyzeText(csvText)) {
+                analyzeData();
+            }
+        }
+
+        function updateCoreCountMode() {
+            updateCoreCountLabel();
+            updateOffsetInputs();
+        }
+
+        function resolveCoreCount() {
+            const selected = document.getElementById('coreCount').value;
+            return selected === 'auto' ? (detectedCoreCount || 8) : parseInt(selected);
+        }
+
+        function updateCoreCountLabel() {
+            const label = document.getElementById('coreDetect');
+            const selected = document.getElementById('coreCount').value;
+
+            if (selected === 'auto') {
+                label.textContent = detectedCoreCount ? `Auto: ${detectedCoreCount} cores detected` : 'Auto: waiting for CSV';
+            } else {
+                label.textContent = `Manual override: ${selected} cores`;
+            }
+        }
+
+        function updateScopeLabel(groups) {
+            const label = document.getElementById('scopeDetect');
+            const selected = document.getElementById('analysisScope').value;
+
+            if (selected === 'whole') {
+                label.textContent = 'Manual: one CPU-wide baseline';
+                return;
+            }
+
+            if (!groups) {
+                label.textContent = 'Auto: waiting for CSV';
+                return;
+            }
+
+            const groupCount = Object.keys(groups).length;
+            label.textContent = groupCount > 1
+                ? `Auto: ${groupCount} CCD groups detected`
+                : 'Auto: single CCD / whole CPU';
+        }
+
+        function updateOffsetInputs() {
+            const coreCount = resolveCoreCount();
+            const container = document.getElementById('offsetInputs');
+            const previous = getCurrentOffsetsSafe();
+            container.innerHTML = '';
+            updateCoreCountLabel();
+
+            for (let i = 0; i < coreCount; i++) {
+                const div = document.createElement('div');
+                div.className = 'offset-input';
+                div.innerHTML = `
+                    <label for="offset${i}">Core ${i}</label>
+                    <input type="number" id="offset${i}" value="${previous[i] ?? 0}" min="-50" max="30">
+                `;
+                container.appendChild(div);
+            }
+        }
+
+        function getCurrentOffsetsSafe() {
+            const container = document.getElementById('offsetInputs');
+            if (!container) return {};
+
+            const offsets = {};
+            container.querySelectorAll('input[id^="offset"]').forEach(input => {
+                const coreIdx = parseInt(input.id.replace('offset', ''));
+                offsets[coreIdx] = parseInt(input.value) || 0;
+            });
+            return offsets;
+        }
+
+        function resetOffsets() {
+            document.querySelectorAll('#offsetInputs input').forEach(input => {
+                input.value = 0;
+            });
+            setStatus('Offsets reset');
+        }
+
+        function clearCsv() {
+            document.getElementById('csvText').value = '';
+            document.getElementById('fileName').textContent = '';
+            detectedCoreCount = null;
+            updateOffsetInputs();
+            updateScopeLabel(null);
+            setStatus('Waiting for CSV data');
+        }
+
+        function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    document.getElementById('csvText').value = e.target.result;
+                    document.getElementById('fileName').textContent = file.name;
+                    updateDetectedCoreCountFromText(e.target.result);
+                    setStatus('CSV loaded - analyzing');
+                    scheduleAutoAnalyze(e.target.result, 0);
+                };
+                reader.onloadend = function() {
+                    event.target.value = '';
+                };
+                reader.readAsText(file);
+            }
+        }
+
+        function getCurrentOffsets() {
+            const coreCount = resolveCoreCount();
+            const offsets = {};
+            for (let i = 0; i < coreCount; i++) {
+                const val = parseInt(document.getElementById(`offset${i}`).value) || 0;
+                offsets[i] = val;
+            }
+            return offsets;
+        }
+
+        function updateDetectedCoreCountFromText(text) {
+            if (!text.trim()) {
+                updateCoreCountLabel();
+                return;
+            }
+
+            const firstLine = text.trimStart().split(/\r?\n/, 1)[0];
+            const headers = parseCSVLine(firstLine).map(h => h.trim().replace(/^"|"$/g, ''));
+            const detected = detectCoreCount(headers);
+
+            if (detected > 0 && detected !== detectedCoreCount) {
+                detectedCoreCount = detected;
+                if (document.getElementById('coreCount').value === 'auto') {
+                    updateOffsetInputs();
+                } else {
+                    updateCoreCountLabel();
+                }
+            } else {
+                updateCoreCountLabel();
+            }
+        }
+
+        function scheduleAutoAnalyze(text, delay = 250) {
+            clearTimeout(autoAnalyzeTimer);
+            autoAnalyzeTimer = setTimeout(() => {
+                if (canAnalyzeText(text)) {
+                    analyzeData();
+                }
+            }, delay);
+        }
+
+        function canAnalyzeText(text) {
+            if (!text.trim()) return false;
+
+            const data = parseCSV(text);
+            if (!data || data.rows.length === 0) return false;
+
+            const hasCurrent = data.headers.some(h => /CPU\s+Core\s+Current.*SVI3/i.test(h));
+            const hasVid = data.headers.some(h => /^Core\s+\d+\s+VID.*\[V\]/i.test(h));
+            return hasCurrent && hasVid;
+        }
+
+        function detectCoreCount(headers) {
+            const coreIndexes = headers
+                .map(h => h.match(/^Core\s+(\d+)\s+VID.*\[V\]/i))
+                .filter(Boolean)
+                .map(match => parseInt(match[1]))
+                .filter(Number.isFinite);
+
+            return coreIndexes.length > 0 ? Math.max(...coreIndexes) + 1 : 0;
+        }
+
+        function getCoreIndexFromVidColumn(col) {
+            const match = col.match(/^Core\s+(\d+)\s+VID/i);
+            return match ? parseInt(match[1]) : null;
+        }
+
+        function detectCCDGroups(headers, coreIndexes) {
+            const groups = {};
+            const knownCores = new Set(coreIndexes);
+
+            headers.forEach(header => {
+                const match = header.match(/^Core\s*(\d+)\s+\(CCD\s*(\d+)\)/i);
+                if (!match) return;
+
+                const coreIdx = parseInt(match[1]);
+                const ccdIdx = parseInt(match[2]);
+                if (!knownCores.has(coreIdx)) return;
+
+                const label = `CCD${ccdIdx}`;
+                if (!groups[label]) groups[label] = [];
+                if (!groups[label].includes(coreIdx)) groups[label].push(coreIdx);
+            });
+
+            if (Object.keys(groups).length === 0 && coreIndexes.length > 8) {
+                const chunkSize = coreIndexes.length <= 16 ? Math.ceil(coreIndexes.length / 2) : 8;
+                for (let i = 0; i < coreIndexes.length; i += chunkSize) {
+                    groups[`CCD${Math.floor(i / chunkSize) + 1}`] = coreIndexes.slice(i, i + chunkSize);
+                }
+            }
+
+            if (Object.keys(groups).length === 0) {
+                groups.CPU = [...coreIndexes];
+            }
+
+            Object.values(groups).forEach(cores => cores.sort((a, b) => a - b));
+            return groups;
+        }
+
+        function resolveAnalysisGroups(headers, coreIndexes) {
+            const scope = document.getElementById('analysisScope').value;
+            const ccdGroups = detectCCDGroups(headers, coreIndexes);
+
+            if (scope === 'whole' || Object.keys(ccdGroups).length < 2) {
+                const groups = { CPU: [...coreIndexes] };
+                updateScopeLabel(groups);
+                return groups;
+            }
+
+            updateScopeLabel(ccdGroups);
+            return ccdGroups;
+        }
+
+        function getCoreGroupLabel(groups, coreIdx) {
+            return Object.entries(groups).find(([, cores]) => cores.includes(coreIdx))?.[0] || 'CPU';
+        }
+
+        function calculateReferenceMeans(vidMeans, groups) {
+            const referenceMeans = {};
+            const groupMeans = {};
+            const meansByCore = {};
+
+            Object.entries(vidMeans).forEach(([col, mean]) => {
+                const coreIdx = getCoreIndexFromVidColumn(col);
+                if (coreIdx !== null) meansByCore[coreIdx] = mean;
+            });
+
+            Object.entries(groups).forEach(([group, cores]) => {
+                const values = cores.map(core => meansByCore[core]).filter(Number.isFinite);
+                if (values.length === 0) return;
+
+                const groupMean = values.reduce((a, b) => a + b) / values.length;
+                groupMeans[group] = groupMean;
+                cores.forEach(core => {
+                    referenceMeans[core] = groupMean;
+                });
+            });
+
+            return { referenceMeans, groupMeans };
+        }
+
+        function parseCSV(text) {
+            const lines = text.trim().split(/\r?\n/);
+            if (lines.length < 2) return null;
+
+            const headers = parseCSVLine(lines[0]).map(h => h.trim().replace(/^"|"$/g, ''));
+            const rows = [];
+
+            for (let i = 1; i < lines.length; i++) {
+                const values = parseCSVLine(lines[i]);
+                if (values.length === headers.length) {
+                    const row = {};
+                    headers.forEach((h, idx) => {
+                        row[h] = values[idx];
+                    });
+                    rows.push(row);
+                }
+            }
+
+            return { headers, rows };
+        }
+
+        function parseCSVLine(line) {
+            const result = [];
+            let current = '';
+            let inQuotes = false;
+
+            for (let i = 0; i < line.length; i++) {
+                const char = line[i];
+                const next = line[i + 1];
+
+                if (char === '"' && inQuotes && next === '"') {
+                    current += '"';
+                    i++;
+                } else if (char === '"') {
+                    inQuotes = !inQuotes;
+                } else if (char === ',' && !inQuotes) {
+                    result.push(current.trim());
+                    current = '';
+                } else {
+                    current += char;
+                }
+            }
+            result.push(current.trim());
+            return result;
+        }
+
+        function detectColumn(headers, pattern) {
+            return headers.find(h => pattern.test(h)) || null;
+        }
+
+        function analyzeData() {
+            const csvText = document.getElementById('csvText').value;
+            const minCurrent = parseFloat(document.getElementById('minCurrent').value);
+            const mvStep = parseFloat(document.getElementById('mvStep').value);
+            const currentOffsets = getCurrentOffsets();
+            const resultsDiv = document.getElementById('results');
+
+            if (!csvText.trim()) {
+                showError(resultsDiv, 'Please upload or paste CSV data.');
+                return;
+            }
+
+            if (!Number.isFinite(minCurrent) || !Number.isFinite(mvStep) || mvStep <= 0) {
+                showError(resultsDiv, 'Minimum current and mV step must be valid numbers.');
+                return;
+            }
+
+            try {
+                const data = parseCSV(csvText);
+                if (!data) {
+                    throw new Error('Failed to parse CSV');
+                }
+
+                const currentPattern = /CPU\s+Core\s+Current.*SVI3/i;
+                const vidPattern = /^Core\s+\d+\s+VID.*\[V\]/i;
+
+                const currentCol = detectColumn(data.headers, currentPattern);
+                if (!currentCol) {
+                    throw new Error('Could not find CPU Core Current (SVI3) column');
+                }
+
+                const detected = detectCoreCount(data.headers);
+                if (detected > 0) {
+                    detectedCoreCount = detected;
+                    if (document.getElementById('coreCount').value === 'auto') {
+                        updateOffsetInputs();
+                    } else {
+                        updateCoreCountLabel();
+                    }
+                }
+
+                const selectedCoreCount = resolveCoreCount();
+                const vidCols = data.headers
+                    .filter(h => vidPattern.test(h))
+                    .filter(h => {
+                        const match = h.match(/Core\s+(\d+)/i);
+                        return match && parseInt(match[1]) < selectedCoreCount;
+                    });
+                const coreIndexes = vidCols
+                    .map(getCoreIndexFromVidColumn)
+                    .filter(Number.isFinite)
+                    .sort((a, b) => a - b);
+
+                if (vidCols.length === 0) {
+                    throw new Error('Could not find any Core VID columns');
+                }
+
+                const validRows = data.rows.filter(row => {
+                    const current = parseFloat(row[currentCol]);
+                    return !isNaN(current) && current >= minCurrent;
+                });
+
+                if (validRows.length === 0) {
+                    throw new Error(`No rows found with current >= ${minCurrent}A`);
+                }
+
+                const vidMeans = {};
+                vidCols.forEach(col => {
+                    const values = validRows.map(row => parseFloat(row[col])).filter(v => !isNaN(v));
+                    if (values.length > 0) {
+                        vidMeans[col] = values.reduce((a, b) => a + b) / values.length;
+                    }
+                });
+
+                const meanValues = Object.values(vidMeans);
+                const globalMean = meanValues.reduce((a, b) => a + b) / meanValues.length;
+                const variance = meanValues.reduce((sum, val) => sum + Math.pow(val - globalMean, 2), 0) / meanValues.length;
+                const stdDev = Math.sqrt(variance) * 1000;
+                const correlation = calculateAvgCorrelation(validRows, vidCols);
+                const groups = resolveAnalysisGroups(data.headers, coreIndexes);
+                const { referenceMeans, groupMeans } = calculateReferenceMeans(vidMeans, groups);
+                const recommendations = calculateOffsets(vidMeans, referenceMeans, mvStep, currentOffsets);
+
+                displayResults(resultsDiv, {
+                    totalRows: data.rows.length,
+                    validRows: validRows.length,
+                    minCurrent,
+                    stdDev,
+                    correlation,
+                    vidMeans,
+                    globalMean,
+                    referenceMeans,
+                    groupMeans,
+                    groups,
+                    currentOffsets,
+                    recommendations
+                });
+                setStatus('Analysis complete');
+            } catch (error) {
+                showError(resultsDiv, error.message);
+            }
+        }
+
+        function calculateAvgCorrelation(rows, cols) {
+            const n = cols.length;
+            if (n < 2) return 0;
+
+            let sumCorr = 0;
+            let count = 0;
+
+            for (let i = 0; i < n; i++) {
+                for (let j = i + 1; j < n; j++) {
+                    const corr = pearsonCorrelation(rows, cols[i], cols[j]);
+                    if (!isNaN(corr)) {
+                        sumCorr += corr;
+                        count++;
+                    }
+                }
+            }
+
+            return count > 0 ? sumCorr / count : 0;
+        }
+
+        function pearsonCorrelation(rows, col1, col2) {
+            const pairs = rows.map(row => ({
+                x: parseFloat(row[col1]),
+                y: parseFloat(row[col2])
+            })).filter(p => !isNaN(p.x) && !isNaN(p.y));
+
+            if (pairs.length < 2) return NaN;
+
+            const n = pairs.length;
+            const sumX = pairs.reduce((s, p) => s + p.x, 0);
+            const sumY = pairs.reduce((s, p) => s + p.y, 0);
+            const sumXY = pairs.reduce((s, p) => s + p.x * p.y, 0);
+            const sumX2 = pairs.reduce((s, p) => s + p.x * p.x, 0);
+            const sumY2 = pairs.reduce((s, p) => s + p.y * p.y, 0);
+
+            const numerator = n * sumXY - sumX * sumY;
+            const denominator = Math.sqrt((n * sumX2 - sumX * sumX) * (n * sumY2 - sumY * sumY));
+
+            return denominator === 0 ? 0 : numerator / denominator;
+        }
+
+        function calculateOffsets(vidMeans, referenceMeans, mvStep, currentOffsets) {
+            const recommendations = {};
+
+            Object.entries(vidMeans).forEach(([col, vid]) => {
+                const coreIdx = getCoreIndexFromVidColumn(col);
+                if (coreIdx !== null && Number.isFinite(referenceMeans[coreIdx])) {
+                    const delta = Math.round(-(vid - referenceMeans[coreIdx]) * 1000 / mvStep);
+                    const baseOffset = currentOffsets[coreIdx] || 0;
+                    let recommended = baseOffset + delta;
+
+                    recommended = Math.max(-50, Math.min(0, recommended));
+                    recommendations[coreIdx] = recommended;
+                }
+            });
+
+            return recommendations;
+        }
+
+        function showError(container, message) {
+            container.className = '';
+            container.innerHTML = `<div class="message error">Error: ${escapeHTML(message)}</div>`;
+            setStatus('Needs attention');
+        }
+
+        function escapeHTML(value) {
+            return String(value).replace(/[&<>"']/g, char => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#039;'
+            }[char]));
+        }
+
+        function formatChange(value) {
+            if (value === 0) return 'no change';
+            return `${value > 0 ? '+' : ''}${value} from current`;
+        }
+
+        function buildCopyText(recommendations, groups) {
+            const lines = [];
+            const groupEntries = Object.entries(groups);
+
+            groupEntries.forEach(([group, cores]) => {
+                if (groupEntries.length > 1) lines.push(`${group}:`);
+                cores
+                    .filter(core => Object.prototype.hasOwnProperty.call(recommendations, core))
+                    .sort((a, b) => a - b)
+                    .forEach(core => {
+                        lines.push(`${groupEntries.length > 1 ? '  ' : ''}Core ${core}: ${recommendations[core]}`);
+                    });
+            });
+
+            return lines.length > 0 ? lines.join('\n') : Object.entries(recommendations)
+                .sort((a, b) => parseInt(a[0]) - parseInt(b[0]))
+                .map(([core, offset]) => `Core ${core}: ${offset}`)
+                .join('\n');
+        }
+
+        function copyRecommendations() {
+            const text = document.getElementById('copyText')?.textContent || '';
+            if (!text) return;
+
+            navigator.clipboard.writeText(text).then(() => {
+                setStatus('Recommendations copied');
+            }).catch(() => {
+                setStatus('Copy unavailable');
+            });
+        }
+
+        function displayResults(container, results) {
+            const sortedVid = Object.entries(results.vidMeans).sort((a, b) => {
+                const aCore = getCoreIndexFromVidColumn(a[0]) ?? 0;
+                const bCore = getCoreIndexFromVidColumn(b[0]) ?? 0;
+                return aCore - bCore;
+            });
+            const sortedRecs = Object.entries(results.recommendations).sort((a, b) => parseInt(a[0]) - parseInt(b[0]));
+            const copyText = buildCopyText(results.recommendations, results.groups);
+            const validPercent = ((results.validRows / results.totalRows) * 100).toFixed(1);
+            const groupCount = Object.keys(results.groups).length;
+            const scopeLabel = groupCount > 1 ? `${groupCount} CCD groups` : 'Whole CPU';
+
+            let html = '';
+            html += '<div class="message success">Analysis complete. Review stability before applying new CO values.</div>';
+            html += '<div class="metrics" style="margin-top: 16px;">';
+            html += metricHTML('Filtered rows', `${results.validRows}`, `${validPercent}% of log`);
+            html += metricHTML('VID spread', results.stdDev.toFixed(3), 'mV std dev');
+            html += metricHTML('Correlation', results.correlation.toFixed(3), 'avg pairwise');
+            html += metricHTML('Scope', scopeLabel, groupCount > 1 ? 'per-CCD baseline' : 'single baseline');
+            html += '</div>';
+
+            html += '<div class="result-grid">';
+            html += '<div class="result-card">';
+            html += '<div class="card-head"><h3>Per-core VID</h3></div>';
+            html += '<table><thead><tr><th>Core</th><th>Group</th><th>Mean VID</th><th>Delta</th></tr></thead><tbody>';
+            sortedVid.forEach(([col, mean]) => {
+                const coreIdx = getCoreIndexFromVidColumn(col);
+                if (coreIdx !== null) {
+                    const group = getCoreGroupLabel(results.groups, coreIdx);
+                    const delta = (mean - results.referenceMeans[coreIdx]) * 1000;
+                    const deltaClass = delta >= 0 ? 'positive' : 'negative';
+                    html += `<tr><td>Core ${coreIdx}</td><td>${group}</td><td>${mean.toFixed(6)} V</td><td class="${deltaClass}">${delta >= 0 ? '+' : ''}${delta.toFixed(3)} mV</td></tr>`;
+                }
+            });
+            html += '</tbody></table></div>';
+
+            html += '<div class="result-card">';
+            html += '<div class="card-head"><h3>Recommended offsets</h3><button type="button" class="ghost-btn" onclick="copyRecommendations()">Copy</button></div>';
+            if (sortedRecs.length === 0) {
+                html += '<p style="padding: 14px; margin: 0; color: var(--muted);">No recommendations available.</p>';
+            } else {
+                html += '<div class="recommendation-list">';
+                sortedRecs.forEach(([core, offset]) => {
+                    const current = results.currentOffsets[core] || 0;
+                    const change = offset - current;
+                    const group = getCoreGroupLabel(results.groups, parseInt(core));
+                    html += `<div class="rec-chip"><strong>${group} / Core ${core}</strong><div class="rec-value">${offset}</div><div class="rec-change">${formatChange(change)}</div></div>`;
+                });
+                html += '</div>';
+                html += `<pre id="copyText" class="copy-box">${escapeHTML(copyText)}</pre>`;
+            }
+            html += '</div></div>';
+
+            container.className = '';
+            container.innerHTML = html;
+        }
+
+        function metricHTML(label, value, unit) {
+            return `
+                <div class="metric">
+                    <div class="metric-label">${label}</div>
+                    <div class="metric-value">${value}</div>
+                    <div class="metric-unit">${unit}</div>
+                </div>
+            `;
+        }
+    </script>
+</body>
+</html>
