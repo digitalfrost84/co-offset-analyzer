@@ -20,6 +20,44 @@ The analyzer runs entirely in your browser. CSV data is processed locally and is
 3. Review the recommended per-core offsets.
 4. Stability-test carefully before applying values in BIOS or tuning software.
 
+## Beginner Iteration Guide
+
+This tool does not apply CO offsets by itself. It only helps you decide what to try next.
+
+The basic loop is:
+
+1. Start with all current CO offsets set to `0`.
+2. Start HWiNFO64 logging.
+3. Run a heavy all-core workload long enough to collect useful data.
+4. Stop HWiNFO64 logging.
+5. Load the CSV into this analyzer.
+6. Apply the recommended offsets in BIOS, SMUDebugTool, or your preferred tuning tool.
+7. Click `Use` in the analyzer so the recommended offsets become the new current offsets.
+8. Start a new HWiNFO64 log with those offsets applied.
+9. Run the workload again.
+10. Load the new CSV and repeat.
+
+Do not keep appending to the same HWiNFO64 log between iterations. Stop logging and start a fresh log after applying new offsets, so each CSV represents exactly one offset set.
+
+### When To Stop
+
+You are usually close enough when:
+
+- VID correlation is high, roughly `0.95` or better.
+- VID spread is low, roughly a few mV.
+- Most recommendations say `no change`.
+- Remaining recommendations are only `+1` or `-1` and do not repeat consistently.
+
+Tiny one-step changes can be measurement noise. If a core asks for the same one-step change across multiple fresh logs, it is more likely worth applying.
+
+### Conservative Iteration
+
+If you want fewer iterations:
+
+1. Apply the first recommendation from `0`.
+2. On later passes, ignore one-step changes unless the same core repeats the same direction.
+3. Stop tuning and begin stability testing once the tool mostly recommends no change.
+
 ## HWiNFO64 Logging Tips
 
 For best results, log while running a heavy all-core workload. The CSV should include:

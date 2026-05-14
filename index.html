@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CO Offset Analyzer</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <style>
         :root {
             color-scheme: dark;
@@ -195,6 +196,12 @@
             margin-bottom: 12px;
         }
 
+        .button-row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
         .offset-inputs {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
@@ -331,6 +338,21 @@
             border: 1px solid var(--line);
             border-radius: 6px;
             background: var(--panel-soft);
+        }
+
+        .metric.good {
+            border-color: rgba(82, 183, 136, 0.45);
+            background: rgba(82, 183, 136, 0.1);
+        }
+
+        .metric.warn {
+            border-color: rgba(242, 184, 75, 0.48);
+            background: rgba(242, 184, 75, 0.1);
+        }
+
+        .metric.bad {
+            border-color: rgba(255, 107, 107, 0.48);
+            background: rgba(255, 107, 107, 0.1);
         }
 
         .metric-label {
@@ -503,6 +525,11 @@
                 flex-direction: column;
             }
 
+            .button-row {
+                display: grid;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
             .status-pill {
                 width: 100%;
                 justify-content: center;
@@ -582,7 +609,12 @@
                 <div class="section">
                     <div class="offset-toolbar">
                         <h3>Current CO offsets</h3>
-                        <button type="button" class="ghost-btn" onclick="resetOffsets()">Reset</button>
+                        <div class="button-row">
+                            <button type="button" class="ghost-btn" onclick="nudgeAllOffsets(-1)">-1</button>
+                            <button type="button" class="ghost-btn" onclick="nudgeAllOffsets(1)">+1</button>
+                            <button type="button" class="ghost-btn" onclick="pasteOffsetsFromClipboard()">Paste</button>
+                            <button type="button" class="ghost-btn" onclick="resetOffsets()">Reset</button>
+                        </div>
                     </div>
                     <div id="offsetInputs" class="offset-inputs"></div>
                 </div>
@@ -613,6 +645,7 @@
         let detectedCoreCount = null;
         let detectTimer = null;
         let autoAnalyzeTimer = null;
+        let latestRecommendations = null;
 
         updateOffsetInputs();
         document.getElementById('csvText').addEventListener('input', () => {
@@ -712,6 +745,89 @@
                 input.value = 0;
             });
             setStatus('Offsets reset');
+        }
+
+        function nudgeAllOffsets(amount) {
+            document.querySelectorAll('#offsetInputs input').forEach(input => {
+                const min = parseInt(input.min);
+                const max = parseInt(input.max);
+                const current = parseInt(input.value) || 0;
+                input.value = Math.max(min, Math.min(max, current + amount));
+            });
+            setStatus(`${amount > 0 ? 'Increased' : 'Decreased'} all current offsets by 1`);
+        }
+
+        function applyOffsetsToInputs(offsets) {
+            let applied = 0;
+
+            Object.entries(offsets).forEach(([core, offset]) => {
+                const input = document.getElementById(`offset${core}`);
+                if (!input) return;
+
+                input.value = Math.max(-50, Math.min(30, parseInt(offset)));
+                applied++;
+            });
+
+            return applied;
+        }
+
+        function parseOffsetsText(text) {
+            const offsets = {};
+            const corePattern = /Core\s+(\d+)\s*:\s*(-?\d+)/gi;
+            let match;
+
+            while ((match = corePattern.exec(text)) !== null) {
+                offsets[parseInt(match[1])] = parseInt(match[2]);
+            }
+
+            if (Object.keys(offsets).length > 0) {
+                return offsets;
+            }
+
+            const numericValues = text
+                .split(/[\s,;]+/)
+                .map(value => value.trim())
+                .filter(Boolean)
+                .map(Number)
+                .filter(Number.isFinite);
+
+            numericValues.forEach((value, index) => {
+                offsets[index] = value;
+            });
+
+            return offsets;
+        }
+
+        function pasteOffsetsFromText(text) {
+            const offsets = parseOffsetsText(text);
+            const applied = applyOffsetsToInputs(offsets);
+
+            if (applied > 0) {
+                setStatus(`Applied ${applied} current offsets`);
+            } else {
+                setStatus('No offsets found to paste');
+            }
+        }
+
+        function pasteOffsetsFromClipboard() {
+            if (!navigator.clipboard?.readText) {
+                setStatus('Clipboard paste unavailable');
+                return;
+            }
+
+            navigator.clipboard.readText().then(pasteOffsetsFromText).catch(() => {
+                setStatus('Clipboard paste blocked');
+            });
+        }
+
+        function useRecommendationsAsCurrent() {
+            if (!latestRecommendations) {
+                setStatus('No recommendations to use');
+                return;
+            }
+
+            const applied = applyOffsetsToInputs(latestRecommendations);
+            setStatus(`Applied ${applied} recommendations as current`);
         }
 
         function clearCsv() {
@@ -1008,19 +1124,20 @@
 
                 const meanValues = Object.values(vidMeans);
                 const globalMean = meanValues.reduce((a, b) => a + b) / meanValues.length;
-                const variance = meanValues.reduce((sum, val) => sum + Math.pow(val - globalMean, 2), 0) / meanValues.length;
-                const stdDev = Math.sqrt(variance) * 1000;
                 const correlation = calculateAvgCorrelation(validRows, vidCols);
                 const groups = resolveAnalysisGroups(data.headers, coreIndexes);
                 const { referenceMeans, groupMeans } = calculateReferenceMeans(vidMeans, groups);
-                const recommendations = calculateOffsets(vidMeans, referenceMeans, mvStep, currentOffsets);
+                const vidStats = calculateVidStats(vidMeans, referenceMeans);
+                const recommendations = calculateOffsets(vidMeans, referenceMeans, mvStep, currentOffsets, vidStats.maxDelta);
 
                 displayResults(resultsDiv, {
                     totalRows: data.rows.length,
                     validRows: validRows.length,
                     minCurrent,
-                    stdDev,
+                    stdDev: vidStats.stdDev,
+                    maxDelta: vidStats.maxHighDelta,
                     correlation,
+                    mvStep,
                     vidMeans,
                     globalMean,
                     referenceMeans,
@@ -1076,13 +1193,14 @@
             return denominator === 0 ? 0 : numerator / denominator;
         }
 
-        function calculateOffsets(vidMeans, referenceMeans, mvStep, currentOffsets) {
+        function calculateOffsets(vidMeans, referenceMeans, mvStep, currentOffsets, maxDelta) {
             const recommendations = {};
 
             Object.entries(vidMeans).forEach(([col, vid]) => {
                 const coreIdx = getCoreIndexFromVidColumn(col);
                 if (coreIdx !== null && Number.isFinite(referenceMeans[coreIdx])) {
-                    const delta = Math.round(-(vid - referenceMeans[coreIdx]) * 1000 / mvStep);
+                    const deltaMv = (vid - referenceMeans[coreIdx]) * 1000;
+                    const delta = calculateAdaptiveStep(deltaMv, mvStep, maxDelta);
                     const baseOffset = currentOffsets[coreIdx] || 0;
                     let recommended = baseOffset + delta;
 
@@ -1092,6 +1210,40 @@
             });
 
             return recommendations;
+        }
+
+        function calculateAdaptiveStep(deltaMv, mvStep, maxDelta) {
+            const magnitude = Math.abs(deltaMv);
+            if (magnitude < mvStep * 0.5) return 0;
+
+            const rawSteps = magnitude / mvStep;
+            const stillConverging = maxDelta >= mvStep;
+            const steps = stillConverging ? Math.max(1, Math.round(rawSteps)) : Math.floor(rawSteps);
+
+            if (steps < 1) return 0;
+
+            return -Math.sign(deltaMv) * steps;
+        }
+
+        function calculateVidStats(vidMeans, referenceMeans) {
+            const deltas = Object.entries(vidMeans)
+                .map(([col, mean]) => {
+                    const coreIdx = getCoreIndexFromVidColumn(col);
+                    if (coreIdx === null || !Number.isFinite(referenceMeans[coreIdx])) return null;
+                    return (mean - referenceMeans[coreIdx]) * 1000;
+                })
+                .filter(Number.isFinite);
+
+            if (deltas.length === 0) {
+                return { stdDev: 0, maxDelta: 0 };
+            }
+
+            const variance = deltas.reduce((sum, delta) => sum + Math.pow(delta, 2), 0) / deltas.length;
+            const stdDev = Math.sqrt(variance);
+            const maxAbsDelta = Math.max(...deltas.map(Math.abs));
+            const maxHighDelta = Math.max(0, ...deltas);
+
+            return { stdDev, maxDelta: maxAbsDelta, maxHighDelta };
         }
 
         function showError(container, message) {
@@ -1147,6 +1299,7 @@
         }
 
         function displayResults(container, results) {
+            latestRecommendations = { ...results.recommendations };
             const sortedVid = Object.entries(results.vidMeans).sort((a, b) => {
                 const aCore = getCoreIndexFromVidColumn(a[0]) ?? 0;
                 const bCore = getCoreIndexFromVidColumn(b[0]) ?? 0;
@@ -1157,13 +1310,20 @@
             const validPercent = ((results.validRows / results.totalRows) * 100).toFixed(1);
             const groupCount = Object.keys(results.groups).length;
             const scopeLabel = groupCount > 1 ? `${groupCount} CCD groups` : 'Whole CPU';
+            const rowStatus = getFilteredRowStatus(results.validRows);
+            const rowLabel = getFilteredRowLabel(results.validRows);
+            const spreadStatus = getSpreadStatus(results.stdDev, results.mvStep);
+            const maxDeltaStatus = getMaxDeltaStatus(results.maxDelta, results.mvStep);
+            const correlationStatus = getCorrelationStatus(results.correlation);
+            const guidance = buildGuidance(results, maxDeltaStatus, correlationStatus, rowStatus);
 
             let html = '';
-            html += '<div class="message success">Analysis complete. Review stability before applying new CO values.</div>';
+            html += `<div class="message ${guidance.kind}">${guidance.text}</div>`;
             html += '<div class="metrics" style="margin-top: 16px;">';
-            html += metricHTML('Filtered rows', `${results.validRows}`, `${validPercent}% of log`);
-            html += metricHTML('VID spread', results.stdDev.toFixed(3), 'mV std dev');
-            html += metricHTML('Correlation', results.correlation.toFixed(3), 'avg pairwise');
+            html += metricHTML('Filtered rows', `${results.validRows}`, `${rowLabel} / ${validPercent}% of log`, rowStatus);
+            html += metricHTML('VID std dev', results.stdDev.toFixed(3), 'mV overall spread', spreadStatus);
+            html += metricHTML('Max high VID delta', results.maxDelta.toFixed(3), `target < ${results.mvStep} mV`, maxDeltaStatus);
+            html += metricHTML('Correlation', results.correlation.toFixed(3), 'target >= 0.950', correlationStatus);
             html += metricHTML('Scope', scopeLabel, groupCount > 1 ? 'per-CCD baseline' : 'single baseline');
             html += '</div>';
 
@@ -1183,7 +1343,7 @@
             html += '</tbody></table></div>';
 
             html += '<div class="result-card">';
-            html += '<div class="card-head"><h3>Recommended offsets</h3><button type="button" class="ghost-btn" onclick="copyRecommendations()">Copy</button></div>';
+            html += '<div class="card-head"><h3>Recommended offsets</h3><div class="button-row"><button type="button" class="ghost-btn" onclick="useRecommendationsAsCurrent()">Use</button><button type="button" class="ghost-btn" onclick="copyRecommendations()">Copy</button></div></div>';
             if (sortedRecs.length === 0) {
                 html += '<p style="padding: 14px; margin: 0; color: var(--muted);">No recommendations available.</p>';
             } else {
@@ -1203,9 +1363,121 @@
             container.innerHTML = html;
         }
 
-        function metricHTML(label, value, unit) {
+        function getSpreadStatus(stdDev, mvStep) {
+            if (stdDev <= mvStep) return 'good';
+            if (stdDev <= mvStep * 2) return 'warn';
+            return 'bad';
+        }
+
+        function getMaxDeltaStatus(maxDelta, mvStep) {
+            if (maxDelta < mvStep) return 'good';
+            if (maxDelta < mvStep * 2) return 'warn';
+            return 'bad';
+        }
+
+        function getFilteredRowStatus(validRows) {
+            if (validRows >= 30) return 'good';
+            if (validRows >= 10) return 'warn';
+            return 'bad';
+        }
+
+        function getFilteredRowLabel(validRows) {
+            if (validRows >= 100) return 'high confidence';
+            if (validRows >= 30) return 'usable';
+            if (validRows >= 10) return 'low confidence';
+            return 'too few rows';
+        }
+
+        function getCorrelationStatus(correlation) {
+            if (correlation >= 0.95) return 'good';
+            if (correlation >= 0.9) return 'warn';
+            return 'bad';
+        }
+
+        function getLargestRecommendationChange(recommendations, currentOffsets) {
+            const changes = Object.entries(recommendations).map(([core, offset]) => {
+                const current = currentOffsets[core] || 0;
+                return Math.abs(offset - current);
+            });
+
+            return changes.length > 0 ? Math.max(...changes) : 0;
+        }
+
+        function buildGuidance(results, maxDeltaStatus, correlationStatus, rowStatus) {
+            const largestChange = getLargestRecommendationChange(results.recommendations, results.currentOffsets);
+
+            if (rowStatus === 'bad') {
+                return {
+                    kind: 'error',
+                    text: 'Too few filtered rows. Collect a longer or heavier log before trusting recommendations.'
+                };
+            }
+
+            if (rowStatus === 'warn' && largestChange <= 1) {
+                return {
+                    kind: 'success',
+                    text: 'Filtered row count is low and recommendations are only one-step changes. Collect another log or ignore tiny adjustments.'
+                };
+            }
+
+            if (correlationStatus === 'good' && maxDeltaStatus === 'good') {
+                if (largestChange <= 1) {
+                    return {
+                        kind: 'success',
+                        text: 'Looks converged: VID correlation is strong and the largest high-VID core delta is below one CO step. Start stability testing. Only keep tuning if the same core keeps asking for the same direction across fresh logs.'
+                    };
+                }
+
+                return {
+                    kind: 'success',
+                    text: 'VID quality looks good. The per-core pattern is probably dialed in; preserve it and move all cores together for stability-limit testing.'
+                };
+            }
+
+            if (correlationStatus === 'good' && maxDeltaStatus !== 'good') {
+                return {
+                    kind: 'success',
+                    text: 'Correlation is good, but the largest high-VID core delta is still above one CO step. One more harmonization pass may help before lockstep stability testing.'
+                };
+            }
+
+            if (correlationStatus === 'warn') {
+                if (maxDeltaStatus === 'good') {
+                    return {
+                        kind: 'success',
+                        text: 'The largest high-VID core delta is already below one CO step. Correlation is only moderate, so treat remaining small changes as noise and move toward stability testing.'
+                    };
+                }
+
+                return {
+                    kind: 'success',
+                    text: 'The largest high-VID core delta is still above target and correlation is usable. Consider one conservative harmonization pass, then verify with a fresh log.'
+                };
+            }
+
+            if (maxDeltaStatus === 'good') {
+                return {
+                    kind: 'success',
+                    text: 'The largest high-VID core delta is already below one CO step. Correlation is low, so do not chase remaining changes; move toward stability testing.'
+                };
+            }
+
+            if (maxDeltaStatus === 'warn') {
+                return {
+                    kind: 'success',
+                    text: 'The largest high-VID core delta is close but correlation is low. Ignore one-step changes; either verify with a fresh log or move to stability testing.'
+                };
+            }
+
+            return {
+                kind: 'success',
+                text: 'The largest high-VID core delta is still high, so another conservative harmonization pass can still help. Verify with a fresh log afterward.'
+            };
+        }
+
+        function metricHTML(label, value, unit, status = '') {
             return `
-                <div class="metric">
+                <div class="metric ${status}">
                     <div class="metric-label">${label}</div>
                     <div class="metric-value">${value}</div>
                     <div class="metric-unit">${unit}</div>
