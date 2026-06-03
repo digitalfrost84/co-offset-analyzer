@@ -12,6 +12,7 @@ The analyzer runs entirely in your browser. CSV data is processed locally and is
 - Supports whole-CPU or per-CCD analysis scopes
 - Produces copy-friendly per-core CO recommendations
 - Uses offset-aware convergence logic to avoid chasing low-VID cores that are already at `0`
+- Flags probable per-core clock stretching from reported-vs-effective clock gaps
 - Works offline as a standalone `index.html`
 
 ## Quick Start
@@ -70,6 +71,12 @@ For best results, log while running a heavy all-core workload. The CSV should in
 - Optional but useful for multi-CCD CPUs: `Core0 (CCD1) [C]`, `Core8 (CCD2) [C]`, or equivalent CCD temperature columns
 
 If too few rows pass the current threshold, lower the threshold or collect a longer/heavier workload log.
+
+## Clock Stretching Check
+
+When HWiNFO64 includes both reported core clocks and effective clocks, the analyzer adds a clock stretching table. It compares each busy core's reported clock against its effective clock on the same filtered rows used for VID analysis.
+
+This is a warning signal, not an automatic CO correction. A core is suspicious when its reported clock stays high but its effective clock falls meaningfully behind while the core is active. If a log shows suspected stretching, treat VID recommendations cautiously and verify with another workload or reduce negative CO on the suspect cores before continuing to chase VID balance.
 
 ## How Recommendations Are Calculated
 

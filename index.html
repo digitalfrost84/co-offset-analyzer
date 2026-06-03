@@ -253,6 +253,12 @@
             transform: translateY(0);
         }
 
+        button:disabled {
+            cursor: wait;
+            opacity: 0.62;
+            transform: none;
+        }
+
         .primary-btn {
             background: var(--accent);
             color: #08110d;
@@ -324,6 +330,12 @@
             border-color: rgba(82, 183, 136, 0.45);
             background: rgba(82, 183, 136, 0.12);
             color: #c9f3dc;
+        }
+
+        .message.warn {
+            border-color: rgba(242, 184, 75, 0.48);
+            background: rgba(242, 184, 75, 0.12);
+            color: #ffe0a3;
         }
 
         .metrics {
@@ -498,6 +510,64 @@
             white-space: nowrap;
         }
 
+        .progress-wrap {
+            display: grid;
+            gap: 7px;
+            margin-top: 10px;
+        }
+
+        .progress-wrap[hidden] {
+            display: none;
+        }
+
+        .progress-head {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            color: var(--muted);
+            font-size: 12px;
+            font-weight: 800;
+        }
+
+        .progress-detail {
+            min-width: 0;
+            overflow: hidden;
+            text-align: right;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .progress-track {
+            height: 8px;
+            overflow: hidden;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            background: #10151b;
+        }
+
+        .progress-bar {
+            width: 0%;
+            height: 100%;
+            border-radius: inherit;
+            background: linear-gradient(90deg, var(--accent), #9ee6bd);
+            transition: width 0.14s ease;
+        }
+
+        .progress-wrap.indeterminate .progress-bar {
+            width: 40%;
+            animation: progress-sweep 1.15s ease-in-out infinite;
+        }
+
+        @keyframes progress-sweep {
+            from {
+                transform: translateX(-110%);
+            }
+
+            to {
+                transform: translateX(280%);
+            }
+        }
+
         @media (max-width: 980px) {
             .layout,
             .result-grid {
@@ -604,6 +674,15 @@
                         <p class="field-note">Upload a log or paste CSV content below.</p>
                         <span id="fileName"></span>
                     </div>
+                    <div id="progressWrap" class="progress-wrap" hidden aria-live="polite">
+                        <div class="progress-head">
+                            <span id="progressPhase">Idle</span>
+                            <span id="progressDetail" class="progress-detail"></span>
+                        </div>
+                        <div class="progress-track">
+                            <div id="progressBar" class="progress-bar"></div>
+                        </div>
+                    </div>
                 </div>
 
                 <div class="section">
@@ -623,7 +702,7 @@
                     <label for="csvText">CSV content</label>
                     <textarea id="csvText" placeholder="Paste HWiNFO64 CSV data here..."></textarea>
                     <div class="actions">
-                        <button class="primary-btn" onclick="analyzeData()">Analyze</button>
+                        <button id="analyzeButton" class="primary-btn" onclick="analyzeData()">Analyze</button>
                         <button type="button" class="ghost-btn" onclick="clearCsv()">Clear</button>
                     </div>
                 </div>
@@ -646,12 +725,25 @@
         let detectTimer = null;
         let autoAnalyzeTimer = null;
         let latestRecommendations = null;
+        let uploadedCsvText = '';
+        let uploadedCsvName = '';
+        let activeAnalysisId = 0;
+        const DEFAULT_CSV_PLACEHOLDER = 'Paste HWiNFO64 CSV data here...';
+        const LARGE_TEXTAREA_LIMIT = 2 * 1024 * 1024;
+        const ANALYSIS_YIELD_MS = 32;
 
         updateOffsetInputs();
         document.getElementById('csvText').addEventListener('input', () => {
+            uploadedCsvText = '';
+            uploadedCsvName = '';
+            activeAnalysisId++;
+            document.getElementById('fileName').textContent = '';
+            document.getElementById('csvText').placeholder = DEFAULT_CSV_PLACEHOLDER;
+            clearProgress();
             clearTimeout(detectTimer);
+            clearTimeout(autoAnalyzeTimer);
             detectTimer = setTimeout(() => {
-                const csvText = document.getElementById('csvText').value;
+                const csvText = getActiveCsvText();
                 updateDetectedCoreCountFromText(csvText);
                 scheduleAutoAnalyze(csvText);
             }, 180);
@@ -661,9 +753,89 @@
             document.getElementById('status').textContent = text;
         }
 
+        function getActiveCsvText() {
+            return uploadedCsvText || document.getElementById('csvText').value;
+        }
+
+        function setProgress(phase, percent = null, detail = '') {
+            const wrap = document.getElementById('progressWrap');
+            const bar = document.getElementById('progressBar');
+            wrap.hidden = false;
+            document.getElementById('progressPhase').textContent = phase;
+            document.getElementById('progressDetail').textContent = detail;
+            setStatus(phase);
+
+            if (Number.isFinite(percent)) {
+                const safePercent = Math.max(0, Math.min(100, percent));
+                wrap.classList.remove('indeterminate');
+                bar.style.width = `${safePercent}%`;
+                bar.style.transform = '';
+            } else {
+                wrap.classList.add('indeterminate');
+                bar.style.width = '';
+                bar.style.transform = '';
+            }
+        }
+
+        function clearProgress() {
+            const wrap = document.getElementById('progressWrap');
+            if (!wrap) return;
+
+            wrap.hidden = true;
+            wrap.classList.remove('indeterminate');
+            document.getElementById('progressBar').style.width = '0%';
+            document.getElementById('progressPhase').textContent = 'Idle';
+            document.getElementById('progressDetail').textContent = '';
+        }
+
+        function setAnalysisBusy(isBusy) {
+            const button = document.getElementById('analyzeButton');
+            if (button) button.disabled = isBusy;
+        }
+
+        function yieldToBrowser() {
+            return new Promise(resolve => setTimeout(resolve, 0));
+        }
+
+        async function paintProgress(phase, percent = null, detail = '') {
+            setProgress(phase, percent, detail);
+            await yieldToBrowser();
+        }
+
+        function cancelError() {
+            const error = new Error('Analysis cancelled');
+            error.cancelled = true;
+            return error;
+        }
+
+        function ensureAnalysisCurrent(analysisId) {
+            if (analysisId !== activeAnalysisId) {
+                throw cancelError();
+            }
+        }
+
+        function formatBytes(bytes) {
+            if (!Number.isFinite(bytes)) return '';
+            const units = ['B', 'KB', 'MB', 'GB'];
+            let size = bytes;
+            let unit = 0;
+
+            while (size >= 1024 && unit < units.length - 1) {
+                size /= 1024;
+                unit++;
+            }
+
+            const digits = unit === 0 || size >= 10 ? 0 : 1;
+            return `${size.toFixed(digits)} ${units[unit]}`;
+        }
+
+        function hasCsvContent(text) {
+            return /\S/.test(text);
+        }
+
         function rerunIfReady() {
             updateScopeLabel(null);
-            const csvText = document.getElementById('csvText').value;
+            const csvText = getActiveCsvText();
             if (canAnalyzeText(csvText)) {
                 analyzeData();
             }
@@ -832,7 +1004,14 @@
 
         function clearCsv() {
             document.getElementById('csvText').value = '';
+            document.getElementById('csvText').placeholder = DEFAULT_CSV_PLACEHOLDER;
             document.getElementById('fileName').textContent = '';
+            uploadedCsvText = '';
+            uploadedCsvName = '';
+            activeAnalysisId++;
+            clearTimeout(detectTimer);
+            clearTimeout(autoAnalyzeTimer);
+            clearProgress();
             detectedCoreCount = null;
             updateOffsetInputs();
             updateScopeLabel(null);
@@ -842,13 +1021,46 @@
         function handleFileUpload(event) {
             const file = event.target.files[0];
             if (file) {
+                const analysisId = ++activeAnalysisId;
+                const textArea = document.getElementById('csvText');
+                const fileLabel = document.getElementById('fileName');
                 const reader = new FileReader();
-                reader.onload = function(e) {
-                    document.getElementById('csvText').value = e.target.result;
-                    document.getElementById('fileName').textContent = file.name;
-                    updateDetectedCoreCountFromText(e.target.result);
-                    setStatus('CSV loaded - analyzing');
-                    scheduleAutoAnalyze(e.target.result, 0);
+                clearTimeout(detectTimer);
+                clearTimeout(autoAnalyzeTimer);
+                uploadedCsvText = '';
+                uploadedCsvName = file.name;
+                textArea.value = '';
+                textArea.placeholder = file.size > LARGE_TEXTAREA_LIMIT
+                    ? `Large CSV loaded from ${file.name}; kept out of this text box for performance.`
+                    : DEFAULT_CSV_PLACEHOLDER;
+                fileLabel.textContent = `${file.name} (${formatBytes(file.size)})`;
+                setProgress('Reading CSV', 0, `0 / ${formatBytes(file.size)}`);
+
+                reader.onprogress = function(e) {
+                    if (analysisId !== activeAnalysisId) return;
+                    if (e.lengthComputable) {
+                        const percent = file.size > 0 ? (e.loaded / e.total) * 100 : 100;
+                        setProgress('Reading CSV', percent, `${formatBytes(e.loaded)} / ${formatBytes(e.total)}`);
+                    } else {
+                        setProgress('Reading CSV', null, formatBytes(e.loaded));
+                    }
+                };
+                reader.onerror = function() {
+                    if (analysisId !== activeAnalysisId) return;
+                    clearProgress();
+                    showError(document.getElementById('results'), `Could not read ${file.name}`);
+                };
+                reader.onload = async function(e) {
+                    if (analysisId !== activeAnalysisId) return;
+                    const text = e.target.result || '';
+                    uploadedCsvText = text;
+                    if (file.size <= LARGE_TEXTAREA_LIMIT) {
+                        textArea.value = text;
+                    }
+
+                    updateDetectedCoreCountFromText(text);
+                    await paintProgress('CSV loaded', 100, `${formatBytes(file.size)} ready`);
+                    scheduleAutoAnalyze(text, 0);
                 };
                 reader.onloadend = function() {
                     event.target.value = '';
@@ -868,13 +1080,12 @@
         }
 
         function updateDetectedCoreCountFromText(text) {
-            if (!text.trim()) {
+            if (!hasCsvContent(text)) {
                 updateCoreCountLabel();
                 return;
             }
 
-            const firstLine = text.trimStart().split(/\r?\n/, 1)[0];
-            const headers = parseCSVLine(firstLine).map(h => h.trim().replace(/^"|"$/g, ''));
+            const headers = getCsvHeaders(text);
             const detected = detectCoreCount(headers);
 
             if (detected > 0 && detected !== detectedCoreCount) {
@@ -889,7 +1100,7 @@
             }
         }
 
-        function scheduleAutoAnalyze(text, delay = 250) {
+        function scheduleAutoAnalyze(text = getActiveCsvText(), delay = 250) {
             clearTimeout(autoAnalyzeTimer);
             autoAnalyzeTimer = setTimeout(() => {
                 if (canAnalyzeText(text)) {
@@ -899,14 +1110,38 @@
         }
 
         function canAnalyzeText(text) {
-            if (!text.trim()) return false;
+            if (!hasCsvContent(text)) return false;
 
-            const data = parseCSV(text);
-            if (!data || data.rows.length === 0) return false;
+            const headers = getCsvHeaders(text);
+            if (headers.length === 0) return false;
 
-            const hasCurrent = data.headers.some(h => /CPU\s+Core\s+Current.*SVI3/i.test(h));
-            const hasVid = data.headers.some(h => /^Core\s+\d+\s+VID.*\[V\]/i.test(h));
+            const hasCurrent = headers.some(h => /CPU\s+Core\s+Current.*SVI3/i.test(h));
+            const hasVid = headers.some(h => /^Core\s+\d+\s+VID.*\[V\]/i.test(h));
             return hasCurrent && hasVid;
+        }
+
+        function getCsvHeaders(text) {
+            const firstLine = getFirstNonEmptyLine(text);
+            if (!firstLine) return [];
+
+            return parseCSVLine(firstLine).map(cleanCsvHeader);
+        }
+
+        function getFirstNonEmptyLine(text) {
+            let cursor = 0;
+
+            while (cursor < text.length) {
+                const lineInfo = readCsvLine(text, cursor);
+                const line = lineInfo.line.replace(/^\uFEFF/, '');
+                if (line.trim()) return line;
+                cursor = lineInfo.nextCursor;
+            }
+
+            return '';
+        }
+
+        function cleanCsvHeader(header) {
+            return header.trim().replace(/^"|"$/g, '');
         }
 
         function detectCoreCount(headers) {
@@ -998,24 +1233,76 @@
             return { referenceMeans, groupMeans };
         }
 
-        function parseCSV(text) {
-            const lines = text.trim().split(/\r?\n/);
-            if (lines.length < 2) return null;
+        function readCsvLine(text, cursor) {
+            const newlineIndex = text.indexOf('\n', cursor);
+            let lineEnd = newlineIndex === -1 ? text.length : newlineIndex;
+            if (lineEnd > cursor && text.charCodeAt(lineEnd - 1) === 13) {
+                lineEnd--;
+            }
 
-            const headers = parseCSVLine(lines[0]).map(h => h.trim().replace(/^"|"$/g, ''));
+            return {
+                line: text.slice(cursor, lineEnd),
+                nextCursor: newlineIndex === -1 ? text.length : newlineIndex + 1
+            };
+        }
+
+        async function parseCSVAsync(text, analysisId) {
+            let cursor = 0;
+            let headerLine = '';
+
+            while (cursor < text.length) {
+                const lineInfo = readCsvLine(text, cursor);
+                const line = lineInfo.line.replace(/^\uFEFF/, '');
+                cursor = lineInfo.nextCursor;
+
+                if (line.trim()) {
+                    headerLine = line;
+                    break;
+                }
+            }
+
+            if (!headerLine || cursor >= text.length) return null;
+
+            const headers = parseCSVLine(headerLine).map(cleanCsvHeader);
             const rows = [];
+            let parsedLines = 0;
+            let skippedRows = 0;
+            let lastYield = performance.now();
+            await paintProgress('Parsing CSV', 5, `${headers.length} columns`);
 
-            for (let i = 1; i < lines.length; i++) {
-                const values = parseCSVLine(lines[i]);
+            while (cursor < text.length) {
+                const lineInfo = readCsvLine(text, cursor);
+                const line = lineInfo.line;
+                cursor = lineInfo.nextCursor;
+
+                if (!line.trim()) continue;
+
+                const values = parseCSVLine(line);
                 if (values.length === headers.length) {
                     const row = {};
                     headers.forEach((h, idx) => {
                         row[h] = values[idx];
                     });
                     rows.push(row);
+                } else {
+                    skippedRows++;
+                }
+                parsedLines++;
+
+                if (parsedLines % 500 === 0 && performance.now() - lastYield >= ANALYSIS_YIELD_MS) {
+                    ensureAnalysisCurrent(analysisId);
+                    const percent = text.length > 0 ? 5 + (cursor / text.length) * 30 : 35;
+                    const detail = `${rows.length.toLocaleString()} rows`;
+                    setProgress('Parsing CSV', Math.min(35, percent), detail);
+                    await yieldToBrowser();
+                    lastYield = performance.now();
                 }
             }
 
+            const detail = skippedRows > 0
+                ? `${rows.length.toLocaleString()} rows, ${skippedRows.toLocaleString()} skipped`
+                : `${rows.length.toLocaleString()} rows`;
+            await paintProgress('Parsing CSV', 35, detail);
             return { headers, rows };
         }
 
@@ -1048,29 +1335,38 @@
             return headers.find(h => pattern.test(h)) || null;
         }
 
-        function analyzeData() {
-            const csvText = document.getElementById('csvText').value;
+        async function analyzeData() {
+            const analysisId = ++activeAnalysisId;
+            clearTimeout(autoAnalyzeTimer);
+            const csvText = getActiveCsvText();
             const minCurrent = parseFloat(document.getElementById('minCurrent').value);
             const mvStep = parseFloat(document.getElementById('mvStep').value);
             const currentOffsets = getCurrentOffsets();
             const resultsDiv = document.getElementById('results');
 
-            if (!csvText.trim()) {
+            if (!hasCsvContent(csvText)) {
+                clearProgress();
                 showError(resultsDiv, 'Please upload or paste CSV data.');
                 return;
             }
 
             if (!Number.isFinite(minCurrent) || !Number.isFinite(mvStep) || mvStep <= 0) {
+                clearProgress();
                 showError(resultsDiv, 'Minimum current and mV step must be valid numbers.');
                 return;
             }
 
+            setAnalysisBusy(true);
             try {
-                const data = parseCSV(csvText);
+                await paintProgress('Preparing analysis', 2, uploadedCsvName || 'Pasted CSV');
+
+                const data = await parseCSVAsync(csvText, analysisId);
+                ensureAnalysisCurrent(analysisId);
                 if (!data) {
                     throw new Error('Failed to parse CSV');
                 }
 
+                await paintProgress('Finding columns', 38, `${data.headers.length} columns`);
                 const currentPattern = /CPU\s+Core\s+Current.*SVI3/i;
                 const vidPattern = /^Core\s+\d+\s+VID.*\[V\]/i;
 
@@ -1105,31 +1401,30 @@
                     throw new Error('Could not find any Core VID columns');
                 }
 
-                const validRows = data.rows.filter(row => {
-                    const current = parseFloat(row[currentCol]);
-                    return !isNaN(current) && current >= minCurrent;
-                });
+                const validRows = await filterRowsByCurrentAsync(data.rows, currentCol, minCurrent, analysisId);
+                ensureAnalysisCurrent(analysisId);
 
                 if (validRows.length === 0) {
                     throw new Error(`No rows found with current >= ${minCurrent}A`);
                 }
 
-                const vidMeans = {};
-                vidCols.forEach(col => {
-                    const values = validRows.map(row => parseFloat(row[col])).filter(v => !isNaN(v));
-                    if (values.length > 0) {
-                        vidMeans[col] = values.reduce((a, b) => a + b) / values.length;
-                    }
-                });
+                const vidMeans = await calculateVidMeansAsync(validRows, vidCols, analysisId);
+                ensureAnalysisCurrent(analysisId);
 
                 const meanValues = Object.values(vidMeans);
                 const globalMean = meanValues.reduce((a, b) => a + b) / meanValues.length;
-                const correlation = calculateAvgCorrelation(validRows, vidCols);
+                const correlation = await calculateAvgCorrelationAsync(validRows, vidCols, analysisId);
+                ensureAnalysisCurrent(analysisId);
+
                 const groups = resolveAnalysisGroups(data.headers, coreIndexes);
+                await paintProgress('Calculating offsets', 84, `${coreIndexes.length} cores`);
                 const { referenceMeans, groupMeans } = calculateReferenceMeans(vidMeans, groups);
                 const vidStats = calculateVidStats(vidMeans, referenceMeans);
+                const clockStretch = await calculateClockStretchAsync(validRows, data.headers, coreIndexes, analysisId);
+                ensureAnalysisCurrent(analysisId);
                 const recommendations = calculateOffsets(vidMeans, referenceMeans, mvStep, currentOffsets, vidStats);
 
+                await paintProgress('Rendering results', 97, `${validRows.length.toLocaleString()} filtered rows`);
                 displayResults(resultsDiv, {
                     totalRows: data.rows.length,
                     validRows: validRows.length,
@@ -1144,48 +1439,141 @@
                     groupMeans,
                     groups,
                     currentOffsets,
-                    recommendations
+                    recommendations,
+                    clockStretch
                 });
-                setStatus('Analysis complete');
+                setProgress('Analysis complete', 100, `${validRows.length.toLocaleString()} filtered rows`);
             } catch (error) {
+                if (error.cancelled) return;
+                clearProgress();
                 showError(resultsDiv, error.message);
+            } finally {
+                if (analysisId === activeAnalysisId) {
+                    setAnalysisBusy(false);
+                }
             }
         }
 
-        function calculateAvgCorrelation(rows, cols) {
+        async function filterRowsByCurrentAsync(rows, currentCol, minCurrent, analysisId) {
+            const validRows = [];
+            let lastYield = performance.now();
+
+            for (let i = 0; i < rows.length; i++) {
+                const current = parseFloat(rows[i][currentCol]);
+                if (!isNaN(current) && current >= minCurrent) {
+                    validRows.push(rows[i]);
+                }
+
+                if (i % 5000 === 0 && performance.now() - lastYield >= ANALYSIS_YIELD_MS) {
+                    ensureAnalysisCurrent(analysisId);
+                    const percent = rows.length > 0 ? 38 + (i / rows.length) * 12 : 50;
+                    setProgress('Filtering rows', percent, `${validRows.length.toLocaleString()} matched`);
+                    await yieldToBrowser();
+                    lastYield = performance.now();
+                }
+            }
+
+            await paintProgress('Filtering rows', 50, `${validRows.length.toLocaleString()} matched`);
+            return validRows;
+        }
+
+        async function calculateVidMeansAsync(rows, vidCols, analysisId) {
+            const sums = {};
+            const counts = {};
+            let lastYield = performance.now();
+
+            vidCols.forEach(col => {
+                sums[col] = 0;
+                counts[col] = 0;
+            });
+
+            for (let i = 0; i < rows.length; i++) {
+                const row = rows[i];
+                vidCols.forEach(col => {
+                    const value = parseFloat(row[col]);
+                    if (!isNaN(value)) {
+                        sums[col] += value;
+                        counts[col]++;
+                    }
+                });
+
+                if (i % 3000 === 0 && performance.now() - lastYield >= ANALYSIS_YIELD_MS) {
+                    ensureAnalysisCurrent(analysisId);
+                    const percent = rows.length > 0 ? 50 + (i / rows.length) * 10 : 60;
+                    setProgress('Calculating VID means', percent, `${vidCols.length} cores`);
+                    await yieldToBrowser();
+                    lastYield = performance.now();
+                }
+            }
+
+            const vidMeans = {};
+            vidCols.forEach(col => {
+                if (counts[col] > 0) {
+                    vidMeans[col] = sums[col] / counts[col];
+                }
+            });
+
+            await paintProgress('Calculating VID means', 60, `${Object.keys(vidMeans).length} cores`);
+            return vidMeans;
+        }
+
+        async function calculateAvgCorrelationAsync(rows, cols, analysisId) {
             const n = cols.length;
             if (n < 2) return 0;
 
+            const pairTotal = (n * (n - 1)) / 2;
+            let pairIndex = 0;
             let sumCorr = 0;
             let count = 0;
 
             for (let i = 0; i < n; i++) {
                 for (let j = i + 1; j < n; j++) {
-                    const corr = pearsonCorrelation(rows, cols[i], cols[j]);
+                    const corr = await pearsonCorrelationAsync(rows, cols[i], cols[j], analysisId, pairIndex, pairTotal);
                     if (!isNaN(corr)) {
                         sumCorr += corr;
                         count++;
                     }
+                    pairIndex++;
                 }
             }
 
+            await paintProgress('Calculating correlation', 82, `${pairTotal.toLocaleString()} pairs`);
             return count > 0 ? sumCorr / count : 0;
         }
 
-        function pearsonCorrelation(rows, col1, col2) {
-            const pairs = rows.map(row => ({
-                x: parseFloat(row[col1]),
-                y: parseFloat(row[col2])
-            })).filter(p => !isNaN(p.x) && !isNaN(p.y));
+        async function pearsonCorrelationAsync(rows, col1, col2, analysisId, pairIndex, pairTotal) {
+            let n = 0;
+            let sumX = 0;
+            let sumY = 0;
+            let sumXY = 0;
+            let sumX2 = 0;
+            let sumY2 = 0;
+            let lastYield = performance.now();
 
-            if (pairs.length < 2) return NaN;
+            for (let i = 0; i < rows.length; i++) {
+                const x = parseFloat(rows[i][col1]);
+                const y = parseFloat(rows[i][col2]);
 
-            const n = pairs.length;
-            const sumX = pairs.reduce((s, p) => s + p.x, 0);
-            const sumY = pairs.reduce((s, p) => s + p.y, 0);
-            const sumXY = pairs.reduce((s, p) => s + p.x * p.y, 0);
-            const sumX2 = pairs.reduce((s, p) => s + p.x * p.x, 0);
-            const sumY2 = pairs.reduce((s, p) => s + p.y * p.y, 0);
+                if (!isNaN(x) && !isNaN(y)) {
+                    n++;
+                    sumX += x;
+                    sumY += y;
+                    sumXY += x * y;
+                    sumX2 += x * x;
+                    sumY2 += y * y;
+                }
+
+                if (i % 5000 === 0 && performance.now() - lastYield >= ANALYSIS_YIELD_MS) {
+                    ensureAnalysisCurrent(analysisId);
+                    const pairProgress = pairTotal > 0 ? (pairIndex + (i / rows.length)) / pairTotal : 1;
+                    const percent = 60 + pairProgress * 22;
+                    setProgress('Calculating correlation', percent, `${pairIndex + 1}/${pairTotal} pairs`);
+                    await yieldToBrowser();
+                    lastYield = performance.now();
+                }
+            }
+
+            if (n < 2) return NaN;
 
             const numerator = n * sumXY - sumX * sumY;
             const denominator = Math.sqrt((n * sumX2 - sumX * sumX) * (n * sumY2 - sumY * sumY));
@@ -1283,6 +1671,135 @@
             return { stdDev, maxDelta: maxAbsDelta, maxHighDelta };
         }
 
+        async function calculateClockStretchAsync(rows, headers, coreIndexes, analysisId) {
+            const summaries = {};
+            await paintProgress('Checking clock stretch', 85, `${coreIndexes.length} cores`);
+
+            for (let corePosition = 0; corePosition < coreIndexes.length; corePosition++) {
+                const core = coreIndexes[corePosition];
+                const clockCol = findCoreColumn(headers, core, /^Core\s+CORE\s+Clock$/i, [
+                    new RegExp(`^Core\\s+${core}\\s+Clock.*\\[MHz\\]$`, 'i')
+                ]);
+                const effectiveCol = findCoreColumn(headers, core, /^Core\s+CORE\s+.*Effective\s+Clock/i, [
+                    new RegExp(`^Core\\s+${core}\\s+T\\d+\\s+Effective\\s+Clock.*\\[MHz\\]$`, 'i'),
+                    new RegExp(`^Core\\s+${core}\\s+Effective\\s+Clock.*\\[MHz\\]$`, 'i')
+                ]);
+                if (!clockCol || !effectiveCol) continue;
+
+                const c0Col = findCoreColumn(headers, core, /^Core\s+CORE\s+C0\s+Residency/i, [
+                    new RegExp(`^Core\\s+${core}\\s+C0\\s+Residency.*\\[%\\]$`, 'i')
+                ]);
+                const usageCols = headers.filter(header =>
+                    new RegExp(`^Core\\s+${core}\\s+T\\d+\\s+(Usage|Utility).*\\[%\\]$`, 'i').test(header)
+                );
+
+                const reported = [];
+                const effective = [];
+                const stretchPct = [];
+                const stretchMhz = [];
+                let lastYield = performance.now();
+
+                for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+                    const row = rows[rowIndex];
+                    const clock = parseNumber(row[clockCol]);
+                    const eff = parseNumber(row[effectiveCol]);
+                    if (!Number.isFinite(clock) || !Number.isFinite(eff) || clock < 3000 || eff <= 0) continue;
+
+                    const c0 = c0Col ? parseNumber(row[c0Col]) : NaN;
+                    if (Number.isFinite(c0) && c0 < 90) continue;
+
+                    if (usageCols.length > 0) {
+                        const usageValues = usageCols.map(col => parseNumber(row[col])).filter(Number.isFinite);
+                        if (usageValues.length > 0) {
+                            const maxUsage = Math.max(...usageValues);
+                            if (maxUsage < 80) continue;
+                        }
+                    }
+
+                    const diff = Math.max(0, clock - eff);
+                    reported.push(clock);
+                    effective.push(eff);
+                    stretchMhz.push(diff);
+                    stretchPct.push((diff / clock) * 100);
+
+                    if (rowIndex % 3000 === 0 && performance.now() - lastYield >= ANALYSIS_YIELD_MS) {
+                        ensureAnalysisCurrent(analysisId);
+                        const coreProgress = coreIndexes.length > 0
+                            ? (corePosition + rowIndex / Math.max(rows.length, 1)) / coreIndexes.length
+                            : 1;
+                        setProgress('Checking clock stretch', 85 + coreProgress * 10, `Core ${core}`);
+                        await yieldToBrowser();
+                        lastYield = performance.now();
+                    }
+                }
+
+                if (stretchPct.length === 0) continue;
+
+                const medianPct = percentile(stretchPct, 0.5);
+                const p95Pct = percentile(stretchPct, 0.95);
+                let status = 'ok';
+                if (medianPct >= 7 || p95Pct >= 10) status = 'suspect';
+                else if (medianPct >= 4 || p95Pct >= 6) status = 'watch';
+
+                summaries[core] = {
+                    rows: stretchPct.length,
+                    reportedMean: mean(reported),
+                    effectiveMean: mean(effective),
+                    stretchMeanMhz: mean(stretchMhz),
+                    medianPct,
+                    p95Pct,
+                    status
+                };
+            }
+
+            const values = Object.values(summaries);
+            const worst = values.reduce((current, item) => {
+                if (!current) return item;
+                return item.p95Pct > current.p95Pct ? item : current;
+            }, null);
+            const suspectCount = values.filter(item => item.status === 'suspect').length;
+            const watchCount = values.filter(item => item.status === 'watch').length;
+
+            await paintProgress('Checking clock stretch', 95, values.length > 0 ? `${values.length} cores checked` : 'No clock columns');
+            return {
+                available: values.length > 0,
+                summaries,
+                worstP95: worst ? worst.p95Pct : 0,
+                suspectCount,
+                watchCount
+            };
+        }
+
+        function findCoreColumn(headers, core, preferredPattern, fallbackPatterns) {
+            const preferred = preferredPattern
+                ? headers.find(header => preferredPattern.test(header.replace(String(core), 'CORE')))
+                : null;
+            if (preferred) return preferred;
+
+            for (const pattern of fallbackPatterns) {
+                const match = headers.find(header => pattern.test(header));
+                if (match) return match;
+            }
+
+            return null;
+        }
+
+        function parseNumber(value) {
+            const number = parseFloat(String(value ?? '').replace(',', '.'));
+            return Number.isFinite(number) ? number : NaN;
+        }
+
+        function mean(values) {
+            return values.reduce((sum, value) => sum + value, 0) / values.length;
+        }
+
+        function percentile(values, fraction) {
+            if (values.length === 0) return 0;
+            const sorted = [...values].sort((a, b) => a - b);
+            const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * fraction) - 1));
+            return sorted[index];
+        }
+
         function showError(container, message) {
             container.className = '';
             container.innerHTML = `<div class="message error">Error: ${escapeHTML(message)}</div>`;
@@ -1353,15 +1870,20 @@
             const maxDeltaStatus = getMaxDeltaStatus(results.maxDelta, results.mvStep);
             const correlationStatus = getCorrelationStatus(results.correlation);
             const guidance = buildGuidance(results, maxDeltaStatus, correlationStatus, rowStatus);
+            const clockStretchStatus = getClockStretchStatus(results.clockStretch);
 
             let html = '';
             html += `<div class="message ${guidance.kind}">${guidance.text}</div>`;
+            if (results.clockStretch?.suspectCount > 0) {
+                html += `<div class="message warn" style="margin-top: 10px;">${buildClockStretchWarning(results.clockStretch)}</div>`;
+            }
             html += '<div class="metrics" style="margin-top: 16px;">';
             html += metricHTML('Filtered rows', `${results.validRows}`, `${rowLabel} / ${validPercent}% of log`, rowStatus);
             html += metricHTML('VID std dev', results.stdDev.toFixed(3), 'mV overall spread', spreadStatus);
             html += metricHTML('Max high VID delta', results.maxDelta.toFixed(3), `target < ${results.mvStep} mV`, maxDeltaStatus);
             html += metricHTML('Correlation', results.correlation.toFixed(3), 'target >= 0.950', correlationStatus);
             html += metricHTML('Scope', scopeLabel, groupCount > 1 ? 'per-CCD baseline' : 'single baseline');
+            html += metricHTML('Clock stretch', formatClockStretchMetric(results.clockStretch), 'worst p95 reported/effective gap', clockStretchStatus);
             html += '</div>';
 
             html += '<div class="result-grid">';
@@ -1396,8 +1918,47 @@
             }
             html += '</div></div>';
 
+            if (results.clockStretch?.available) {
+                html += '<div class="result-card" style="margin-top: 14px;">';
+                html += '<div class="card-head"><h3>Clock Stretching</h3></div>';
+                html += '<table><thead><tr><th>Core</th><th>Rows</th><th>Reported</th><th>Effective</th><th>Median gap</th><th>P95 gap</th><th>Status</th></tr></thead><tbody>';
+                Object.entries(results.clockStretch.summaries)
+                    .sort((a, b) => parseInt(a[0]) - parseInt(b[0]))
+                    .forEach(([core, item]) => {
+                        const statusClass = item.status === 'suspect' ? 'positive' : item.status === 'watch' ? '' : 'negative';
+                        html += `<tr><td>Core ${core}</td><td>${item.rows}</td><td>${item.reportedMean.toFixed(0)} MHz</td><td>${item.effectiveMean.toFixed(0)} MHz</td><td>${item.medianPct.toFixed(1)}%</td><td>${item.p95Pct.toFixed(1)}%</td><td class="${statusClass}">${formatStretchStatus(item.status)}</td></tr>`;
+                    });
+                html += '</tbody></table></div>';
+            }
+
             container.className = '';
             container.innerHTML = html;
+        }
+
+        function getClockStretchStatus(clockStretch) {
+            if (!clockStretch?.available) return '';
+            if (clockStretch.suspectCount > 0) return 'bad';
+            if (clockStretch.watchCount > 0) return 'warn';
+            return 'good';
+        }
+
+        function formatClockStretchMetric(clockStretch) {
+            if (!clockStretch?.available) return 'n/a';
+            return `${clockStretch.worstP95.toFixed(1)}%`;
+        }
+
+        function buildClockStretchWarning(clockStretch) {
+            const suspectCores = Object.entries(clockStretch.summaries)
+                .filter(([, item]) => item.status === 'suspect')
+                .map(([core]) => `Core ${core}`)
+                .join(', ');
+            return `Possible clock stretching on ${suspectCores}. Treat VID recommendations from this log cautiously; reduce negative CO on suspect cores or verify with another workload before chasing VID balance.`;
+        }
+
+        function formatStretchStatus(status) {
+            if (status === 'suspect') return 'Suspect';
+            if (status === 'watch') return 'Watch';
+            return 'OK';
         }
 
         function getSpreadStatus(stdDev, mvStep) {
