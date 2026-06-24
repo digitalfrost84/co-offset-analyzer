@@ -338,6 +338,12 @@
             color: #ffe0a3;
         }
 
+        .message.info {
+            border-color: rgba(111, 171, 214, 0.42);
+            background: rgba(111, 171, 214, 0.12);
+            color: #d7eafa;
+        }
+
         .metrics {
             display: grid;
             grid-template-columns: repeat(4, minmax(130px, 1fr));
@@ -1115,8 +1121,8 @@
             const headers = getCsvHeaders(text);
             if (headers.length === 0) return false;
 
-            const hasCurrent = headers.some(h => /CPU\s+Core\s+Current.*SVI3/i.test(h));
-            const hasVid = headers.some(h => /^Core\s+\d+\s+VID.*\[V\]/i.test(h));
+            const hasCurrent = Boolean(resolveLoadSensor(headers));
+            const hasVid = headers.some(isCoreVidColumn);
             return hasCurrent && hasVid;
         }
 
@@ -1144,19 +1150,92 @@
             return header.trim().replace(/^"|"$/g, '');
         }
 
+        function normalizeHeader(header) {
+            return String(header ?? '')
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .toLowerCase();
+        }
+
+        function headerHasUnit(header, unit) {
+            return new RegExp(`\\[\\s*${unit}\\s*\\]`, 'i').test(header);
+        }
+
+        function containsAny(value, terms) {
+            return terms.some(term => value.includes(term));
+        }
+
+        const CPU_TERMS = ['cpu', 'processor', 'prozessor', 'processeur', 'procesador', 'processore'];
+        const CORE_TERMS = ['core', 'kern', 'coeur', 'noyau', 'nucleo'];
+        const CURRENT_TERMS = ['current', 'strom', 'courant', 'corriente', 'corrente', 'amper'];
+        const POWER_TERMS = ['power', 'leistung', 'puissance', 'potencia', 'potenza'];
+        const VOLTAGE_TERMS = ['voltage', 'spannung', 'tension', 'voltaje', 'tensione'];
+        const CLOCK_TERMS = ['clock', 'takt', 'frequenz', 'frequency', 'frequence', 'frecuencia', 'frequencia', 'frequenza'];
+        const EFFECTIVE_TERMS = ['effective', 'effektiv', 'effectif', 'efectiv', 'effettiv', 'efetiv'];
+        const USAGE_TERMS = ['usage', 'utility', 'auslastung', 'utilisation', 'utilization', 'utilizacion', 'uso', 'charge', 'utilizzo'];
+        const CLOCK_EXCLUDE_TERMS = [
+            'gpu',
+            'l3',
+            'cache',
+            'bus',
+            'memory',
+            'speicher',
+            'dram',
+            'fabric',
+            'fclk',
+            'uclk',
+            'limit',
+            'grenzwert',
+            'controller',
+            'ratio'
+        ];
+
+        function isAverageHeader(normalizedHeader) {
+            return containsAny(normalizedHeader, ['avg', 'average', 'durchschnitt', 'moyenne', 'promedio', 'media']);
+        }
+
+        function extractCoreIndex(header, allowLoose = false) {
+            const normalized = normalizeHeader(header);
+            const patterns = [
+                /\bcore\s*#?\s*(\d+)\b/i,
+                /\bcore(\d+)\b/i,
+                /\bkern\s*#?\s*(\d+)\b/i,
+                /\bcoeur\s*#?\s*(\d+)\b/i,
+                /\bnoyau\s*#?\s*(\d+)\b/i,
+                /\bnucleo\s*#?\s*(\d+)\b/i,
+                /\bnucleo(\d+)\b/i
+            ];
+
+            for (const pattern of patterns) {
+                const match = normalized.match(pattern);
+                if (match) return parseInt(match[1]);
+            }
+
+            if (allowLoose && (/\bvid\b/.test(normalized) || /\bt\d+\b/.test(normalized) || /\bccd\s*\d+/.test(normalized))) {
+                const firstNumber = normalized.match(/(?:^|[^\d])(\d+)(?:[^\d]|$)/);
+                return firstNumber ? parseInt(firstNumber[1]) : null;
+            }
+
+            return null;
+        }
+
+        function isCoreVidColumn(header) {
+            return headerHasUnit(header, 'V')
+                && /\bvid\b/i.test(header)
+                && extractCoreIndex(header, true) !== null;
+        }
+
         function detectCoreCount(headers) {
             const coreIndexes = headers
-                .map(h => h.match(/^Core\s+(\d+)\s+VID.*\[V\]/i))
-                .filter(Boolean)
-                .map(match => parseInt(match[1]))
+                .filter(isCoreVidColumn)
+                .map(h => extractCoreIndex(h, true))
                 .filter(Number.isFinite);
 
             return coreIndexes.length > 0 ? Math.max(...coreIndexes) + 1 : 0;
         }
 
         function getCoreIndexFromVidColumn(col) {
-            const match = col.match(/^Core\s+(\d+)\s+VID/i);
-            return match ? parseInt(match[1]) : null;
+            return isCoreVidColumn(col) ? extractCoreIndex(col, true) : null;
         }
 
         function detectCCDGroups(headers, coreIndexes) {
@@ -1164,11 +1243,11 @@
             const knownCores = new Set(coreIndexes);
 
             headers.forEach(header => {
-                const match = header.match(/^Core\s*(\d+)\s+\(CCD\s*(\d+)\)/i);
-                if (!match) return;
+                const ccdMatch = header.match(/\bCCD\s*(\d+)\b/i);
+                if (!ccdMatch) return;
 
-                const coreIdx = parseInt(match[1]);
-                const ccdIdx = parseInt(match[2]);
+                const coreIdx = extractCoreIndex(header);
+                const ccdIdx = parseInt(ccdMatch[1]);
                 if (!knownCores.has(coreIdx)) return;
 
                 const label = `CCD${ccdIdx}`;
@@ -1331,8 +1410,109 @@
             return result;
         }
 
-        function detectColumn(headers, pattern) {
-            return headers.find(h => pattern.test(h)) || null;
+        function rankedColumns(headers, scorer) {
+            return headers
+                .map((header, index) => ({ header, index, score: scorer(header) }))
+                .filter(item => item.score > 0)
+                .sort((a, b) => b.score - a.score || a.index - b.index);
+        }
+
+        function findBestColumn(headers, scorer) {
+            return rankedColumns(headers, scorer)[0]?.header || null;
+        }
+
+        function isCpuHeader(normalizedHeader) {
+            return containsAny(normalizedHeader, CPU_TERMS);
+        }
+
+        function isExcludedSvi3Rail(normalizedHeader) {
+            return containsAny(normalizedHeader, ['soc', 'misc', 'gpu']);
+        }
+
+        function scoreDirectCurrentHeader(header) {
+            const normalized = normalizeHeader(header);
+            if (!headerHasUnit(header, 'A')) return 0;
+            if (!isCpuHeader(normalized) || !normalized.includes('svi3')) return 0;
+            if (isExcludedSvi3Rail(normalized)) return 0;
+
+            let score = 50;
+            if (normalized.includes('vddcr_vdd') || normalized.includes('vddcr vdd')) score += 25;
+            if (containsAny(normalized, CORE_TERMS)) score += 15;
+            if (containsAny(normalized, CURRENT_TERMS)) score += 20;
+            return score;
+        }
+
+        function scoreCorePowerHeader(header) {
+            const normalized = normalizeHeader(header);
+            if (!headerHasUnit(header, 'W')) return 0;
+            if (!isCpuHeader(normalized) || !normalized.includes('svi3')) return 0;
+            if (isExcludedSvi3Rail(normalized) || normalized.includes('ppt')) return 0;
+
+            let score = 45;
+            if (containsAny(normalized, CORE_TERMS)) score += 20;
+            if (containsAny(normalized, POWER_TERMS)) score += 20;
+            if (normalized.includes('vddcr_vdd') || normalized.includes('vddcr vdd')) score += 5;
+            return score;
+        }
+
+        function scoreVddVoltageHeader(header) {
+            const normalized = normalizeHeader(header);
+            if (!headerHasUnit(header, 'V')) return 0;
+            if (!isCpuHeader(normalized) || !normalized.includes('svi3')) return 0;
+            if (isExcludedSvi3Rail(normalized)) return 0;
+            if (!normalized.includes('vddcr_vdd') && !normalized.includes('vddcr vdd')) return 0;
+
+            let score = 70;
+            if (containsAny(normalized, VOLTAGE_TERMS)) score += 20;
+            return score;
+        }
+
+        function scoreTdcHeader(header) {
+            const normalized = normalizeHeader(header);
+            if (!headerHasUnit(header, 'A')) return 0;
+            if (!isCpuHeader(normalized) || !/\btdc\b/.test(normalized)) return 0;
+            return 70;
+        }
+
+        function resolveLoadSensor(headers) {
+            const directCurrentCol = findBestColumn(headers, scoreDirectCurrentHeader);
+            if (directCurrentCol) {
+                return {
+                    label: directCurrentCol,
+                    kind: 'current',
+                    note: 'direct SVI3 core current',
+                    read: row => parseNumber(row[directCurrentCol])
+                };
+            }
+
+            const corePowerCol = findBestColumn(headers, scoreCorePowerHeader);
+            const vddVoltageCol = findBestColumn(headers, scoreVddVoltageHeader);
+            if (corePowerCol && vddVoltageCol) {
+                return {
+                    label: `${corePowerCol} / ${vddVoltageCol}`,
+                    kind: 'estimatedCurrent',
+                    note: 'estimated from SVI3 core power / VDD voltage',
+                    read: row => {
+                        const power = parseNumber(row[corePowerCol]);
+                        const voltage = parseNumber(row[vddVoltageCol]);
+                        return Number.isFinite(power) && Number.isFinite(voltage) && voltage > 0.1
+                            ? power / voltage
+                            : NaN;
+                    }
+                };
+            }
+
+            const tdcCol = findBestColumn(headers, scoreTdcHeader);
+            if (tdcCol) {
+                return {
+                    label: tdcCol,
+                    kind: 'tdc',
+                    note: 'CPU TDC fallback',
+                    read: row => parseNumber(row[tdcCol])
+                };
+            }
+
+            return null;
         }
 
         async function analyzeData() {
@@ -1367,12 +1547,10 @@
                 }
 
                 await paintProgress('Finding columns', 38, `${data.headers.length} columns`);
-                const currentPattern = /CPU\s+Core\s+Current.*SVI3/i;
-                const vidPattern = /^Core\s+\d+\s+VID.*\[V\]/i;
 
-                const currentCol = detectColumn(data.headers, currentPattern);
-                if (!currentCol) {
-                    throw new Error('Could not find CPU Core Current (SVI3) column');
+                const loadSensor = resolveLoadSensor(data.headers);
+                if (!loadSensor) {
+                    throw new Error('Could not find CPU core current, CPU TDC, or SVI3 core power + VDD voltage columns');
                 }
 
                 const detected = detectCoreCount(data.headers);
@@ -1387,10 +1565,10 @@
 
                 const selectedCoreCount = resolveCoreCount();
                 const vidCols = data.headers
-                    .filter(h => vidPattern.test(h))
+                    .filter(isCoreVidColumn)
                     .filter(h => {
-                        const match = h.match(/Core\s+(\d+)/i);
-                        return match && parseInt(match[1]) < selectedCoreCount;
+                        const coreIdx = getCoreIndexFromVidColumn(h);
+                        return coreIdx !== null && coreIdx < selectedCoreCount;
                     });
                 const coreIndexes = vidCols
                     .map(getCoreIndexFromVidColumn)
@@ -1401,11 +1579,11 @@
                     throw new Error('Could not find any Core VID columns');
                 }
 
-                const validRows = await filterRowsByCurrentAsync(data.rows, currentCol, minCurrent, analysisId);
+                const validRows = await filterRowsByCurrentAsync(data.rows, loadSensor, minCurrent, analysisId);
                 ensureAnalysisCurrent(analysisId);
 
                 if (validRows.length === 0) {
-                    throw new Error(`No rows found with current >= ${minCurrent}A`);
+                    throw new Error(`No rows found with load current >= ${minCurrent}A using ${loadSensor.note}`);
                 }
 
                 const vidMeans = await calculateVidMeansAsync(validRows, vidCols, analysisId);
@@ -1440,7 +1618,8 @@
                     groups,
                     currentOffsets,
                     recommendations,
-                    clockStretch
+                    clockStretch,
+                    loadSensor
                 });
                 setProgress('Analysis complete', 100, `${validRows.length.toLocaleString()} filtered rows`);
             } catch (error) {
@@ -1454,26 +1633,26 @@
             }
         }
 
-        async function filterRowsByCurrentAsync(rows, currentCol, minCurrent, analysisId) {
+        async function filterRowsByCurrentAsync(rows, loadSensor, minCurrent, analysisId) {
             const validRows = [];
             let lastYield = performance.now();
 
             for (let i = 0; i < rows.length; i++) {
-                const current = parseFloat(rows[i][currentCol]);
-                if (!isNaN(current) && current >= minCurrent) {
+                const current = loadSensor.read(rows[i]);
+                if (Number.isFinite(current) && current >= minCurrent) {
                     validRows.push(rows[i]);
                 }
 
                 if (i % 5000 === 0 && performance.now() - lastYield >= ANALYSIS_YIELD_MS) {
                     ensureAnalysisCurrent(analysisId);
                     const percent = rows.length > 0 ? 38 + (i / rows.length) * 12 : 50;
-                    setProgress('Filtering rows', percent, `${validRows.length.toLocaleString()} matched`);
+                    setProgress('Filtering rows', percent, `${validRows.length.toLocaleString()} matched, ${loadSensor.note}`);
                     await yieldToBrowser();
                     lastYield = performance.now();
                 }
             }
 
-            await paintProgress('Filtering rows', 50, `${validRows.length.toLocaleString()} matched`);
+            await paintProgress('Filtering rows', 50, `${validRows.length.toLocaleString()} matched, ${loadSensor.note}`);
             return validRows;
         }
 
@@ -1677,21 +1856,12 @@
 
             for (let corePosition = 0; corePosition < coreIndexes.length; corePosition++) {
                 const core = coreIndexes[corePosition];
-                const clockCol = findCoreColumn(headers, core, /^Core\s+CORE\s+Clock$/i, [
-                    new RegExp(`^Core\\s+${core}\\s+Clock.*\\[MHz\\]$`, 'i')
-                ]);
-                const effectiveCol = findCoreColumn(headers, core, /^Core\s+CORE\s+.*Effective\s+Clock/i, [
-                    new RegExp(`^Core\\s+${core}\\s+T\\d+\\s+Effective\\s+Clock.*\\[MHz\\]$`, 'i'),
-                    new RegExp(`^Core\\s+${core}\\s+Effective\\s+Clock.*\\[MHz\\]$`, 'i')
-                ]);
+                const clockCol = findBestCoreColumn(headers, core, scoreReportedClockHeader);
+                const effectiveCol = findBestCoreColumn(headers, core, scoreEffectiveClockHeader);
                 if (!clockCol || !effectiveCol) continue;
 
-                const c0Col = findCoreColumn(headers, core, /^Core\s+CORE\s+C0\s+Residency/i, [
-                    new RegExp(`^Core\\s+${core}\\s+C0\\s+Residency.*\\[%\\]$`, 'i')
-                ]);
-                const usageCols = headers.filter(header =>
-                    new RegExp(`^Core\\s+${core}\\s+T\\d+\\s+(Usage|Utility).*\\[%\\]$`, 'i').test(header)
-                );
+                const c0Col = findBestCoreColumn(headers, core, scoreC0Header);
+                const usageCols = findCoreColumns(headers, core, scoreThreadActivityHeader);
 
                 const reported = [];
                 const effective = [];
@@ -1770,18 +1940,66 @@
             };
         }
 
-        function findCoreColumn(headers, core, preferredPattern, fallbackPatterns) {
-            const preferred = preferredPattern
-                ? headers.find(header => preferredPattern.test(header.replace(String(core), 'CORE')))
-                : null;
-            if (preferred) return preferred;
+        function findBestCoreColumn(headers, core, scorer) {
+            return findBestColumn(headers, header => scorer(header, core));
+        }
 
-            for (const pattern of fallbackPatterns) {
-                const match = headers.find(header => pattern.test(header));
-                if (match) return match;
-            }
+        function findCoreColumns(headers, core, scorer) {
+            return rankedColumns(headers, header => scorer(header, core)).map(item => item.header);
+        }
 
-            return null;
+        function scoreReportedClockHeader(header, core) {
+            const normalized = normalizeHeader(header);
+            if (!headerHasUnit(header, 'MHz')) return 0;
+            if (extractCoreIndex(header, true) !== core) return 0;
+            if (isAverageHeader(normalized) || containsAny(normalized, CLOCK_EXCLUDE_TERMS)) return 0;
+            if (containsAny(normalized, EFFECTIVE_TERMS) || /\bt\d+\b/.test(normalized)) return 0;
+
+            let score = 35;
+            if (containsAny(normalized, CLOCK_TERMS)) score += 40;
+            if (containsAny(normalized, CORE_TERMS)) score += 10;
+            if (/\bperf\b/.test(normalized)) score += 5;
+            return score;
+        }
+
+        function scoreEffectiveClockHeader(header, core) {
+            const normalized = normalizeHeader(header);
+            if (!headerHasUnit(header, 'MHz')) return 0;
+            if (extractCoreIndex(header, true) !== core) return 0;
+            if (isAverageHeader(normalized) || containsAny(normalized, CLOCK_EXCLUDE_TERMS)) return 0;
+
+            const hasThreadTag = /\bt\d+\b/.test(normalized);
+            const hasEffectiveWord = containsAny(normalized, EFFECTIVE_TERMS);
+            if (!hasThreadTag && !hasEffectiveWord) return 0;
+
+            let score = 35;
+            if (hasEffectiveWord) score += 40;
+            if (hasThreadTag) score += 20;
+            if (containsAny(normalized, CLOCK_TERMS)) score += 10;
+            return score;
+        }
+
+        function scoreC0Header(header, core) {
+            const normalized = normalizeHeader(header);
+            if (!headerHasUnit(header, '%')) return 0;
+            if (extractCoreIndex(header, true) !== core) return 0;
+            if (!/\bc0\b/.test(normalized)) return 0;
+
+            let score = 50;
+            if (containsAny(normalized, ['residency', 'residenz', 'residence', 'residencia'])) score += 20;
+            return score;
+        }
+
+        function scoreThreadActivityHeader(header, core) {
+            const normalized = normalizeHeader(header);
+            if (!headerHasUnit(header, '%')) return 0;
+            if (extractCoreIndex(header, true) !== core) return 0;
+            if (isAverageHeader(normalized) || /\bc0\b/.test(normalized)) return 0;
+            if (!/\bt\d+\b/.test(normalized)) return 0;
+
+            let score = 30;
+            if (containsAny(normalized, USAGE_TERMS)) score += 40;
+            return score;
         }
 
         function parseNumber(value) {
@@ -1874,6 +2092,11 @@
 
             let html = '';
             html += `<div class="message ${guidance.kind}">${guidance.text}</div>`;
+            if (results.loadSensor?.kind === 'estimatedCurrent') {
+                html += `<div class="message info" style="margin-top: 10px;">Direct SVI3 core current was not present in this log, so load filtering used a calculated current estimate from SVI3 core power divided by VDD voltage. This is fine for selecting heavy-load rows.</div>`;
+            } else if (results.loadSensor?.kind === 'tdc') {
+                html += `<div class="message warn" style="margin-top: 10px;">Load filtering used CPU TDC because direct CPU core current was not present. Treat row filtering as a fallback estimate.</div>`;
+            }
             if (results.clockStretch?.suspectCount > 0) {
                 html += `<div class="message warn" style="margin-top: 10px;">${buildClockStretchWarning(results.clockStretch)}</div>`;
             }
@@ -1884,6 +2107,7 @@
             html += metricHTML('Correlation', results.correlation.toFixed(3), 'target >= 0.950', correlationStatus);
             html += metricHTML('Scope', scopeLabel, groupCount > 1 ? 'per-CCD baseline' : 'single baseline');
             html += metricHTML('Clock stretch', formatClockStretchMetric(results.clockStretch), 'worst p95 reported/effective gap', clockStretchStatus);
+            html += metricHTML('Load filter', formatLoadSensorMetric(results.loadSensor), `threshold >= ${results.minCurrent} A`);
             html += '</div>';
 
             html += '<div class="result-grid">';
@@ -1959,6 +2183,14 @@
             if (status === 'suspect') return 'Suspect';
             if (status === 'watch') return 'Watch';
             return 'OK';
+        }
+
+        function formatLoadSensorMetric(loadSensor) {
+            if (!loadSensor) return 'n/a';
+            if (loadSensor.kind === 'current') return 'Current';
+            if (loadSensor.kind === 'estimatedCurrent') return 'Est. current';
+            if (loadSensor.kind === 'tdc') return 'CPU TDC';
+            return 'Fallback';
         }
 
         function getSpreadStatus(stdDev, mvStep) {

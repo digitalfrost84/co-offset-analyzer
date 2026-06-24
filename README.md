@@ -70,6 +70,8 @@ For best results, log while running a heavy all-core workload. The CSV should in
 - `Core 0 VID [V]`, `Core 1 VID [V]`, and so on
 - Optional but useful for multi-CCD CPUs: `Core0 (CCD1) [C]`, `Core8 (CCD2) [C]`, or equivalent CCD temperature columns
 
+Localized HWiNFO64 sensor names are supported. The analyzer prefers stable parts of the header such as units, `VID`, `SVI3`, `VDDCR_VDD`, per-core indexes, `T0`/`T1`, and `CCD` tags, then uses language-specific words only as ranking hints. If direct CPU core current is missing, it can estimate load current from SVI3 core power divided by VDD voltage.
+
 If too few rows pass the current threshold, lower the threshold or collect a longer/heavier workload log.
 
 ## Clock Stretching Check
