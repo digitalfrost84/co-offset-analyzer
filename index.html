@@ -138,6 +138,10 @@
             gap: 12px;
         }
 
+        .form-field-full {
+            grid-column: 1 / -1;
+        }
+
         label {
             display: block;
             margin-bottom: 7px;
@@ -679,7 +683,7 @@
                             </select>
                             <p id="scopeDetect" class="field-note">Auto: waiting for CSV</p>
                         </div>
-                        <div>
+                        <div class="form-field-full">
                             <label for="csvFile">HWiNFO64 CSV file</label>
                             <input type="file" id="csvFile" accept=".csv" onchange="handleFileUpload(event)">
                         </div>
