@@ -72,7 +72,7 @@ For best results, log while running a heavy all-core workload. The CSV should in
 
 Localized HWiNFO64 sensor names are supported. The analyzer prefers stable parts of the header such as units, `VID`, `SVI3`, `VDDCR_VDD`, per-core indexes, `T0`/`T1`, and `CCD` tags, then uses language-specific words only as ranking hints. If direct CPU core current is missing, it can estimate load current from SVI3 core power divided by VDD voltage.
 
-If too few rows pass the current threshold, lower the threshold or collect a longer/heavier workload log.
+By default, the analyzer auto-selects a load threshold from the log. When CPU usage data is available, it uses the high-usage plateau to find the matching current range. Otherwise, it falls back to the high-current distribution. This is meant to keep rows where the CPU is under enough load for vdroop and load-line behavior to matter, while skipping idle and light-load samples. If auto mode says the log never reached a useful load range, collect a heavier workload log or switch to manual current only when you know the expected current range.
 
 ## Clock Stretching Check
 
@@ -82,7 +82,7 @@ This is a warning signal, not an automatic CO correction. A core is suspicious w
 
 ## How Recommendations Are Calculated
 
-The tool filters log rows by CPU core current, calculates the average VID for each core, then compares each core against a reference mean:
+The tool filters log rows by CPU load current, calculates the average VID for each core, then compares each core against a reference mean:
 
 - `Auto CCD`: each core is compared against its detected CCD mean when possible
 - `Whole CPU`: each core is compared against the global CPU mean

@@ -656,8 +656,16 @@
                             <p id="coreDetect" class="field-note">Auto: waiting for CSV</p>
                         </div>
                         <div>
-                            <label for="minCurrent">Minimum current (A)</label>
-                            <input type="number" id="minCurrent" value="70" step="0.1">
+                            <label for="loadThresholdMode">Load threshold</label>
+                            <select id="loadThresholdMode" onchange="updateLoadThresholdMode(); rerunIfReady()">
+                                <option value="auto" selected>Auto-detect</option>
+                                <option value="manual">Manual current</option>
+                            </select>
+                            <p id="loadThresholdNote" class="field-note">Auto keeps the high-current load range.</p>
+                        </div>
+                        <div>
+                            <label for="minCurrent">Manual minimum (A)</label>
+                            <input type="number" id="minCurrent" value="70" step="0.1" disabled>
                         </div>
                         <div>
                             <label for="mvStep">mV per CO step</label>
@@ -737,8 +745,15 @@
         const DEFAULT_CSV_PLACEHOLDER = 'Paste HWiNFO64 CSV data here...';
         const LARGE_TEXTAREA_LIMIT = 2 * 1024 * 1024;
         const ANALYSIS_YIELD_MS = 32;
+        const AUTO_LOAD_PEAK_RATIO = 0.65;
+        const AUTO_LOAD_P95_RATIO = 0.85;
+        const AUTO_LOAD_USAGE_MIN = 80;
+        const AUTO_LOAD_USAGE_MIN_ROWS = 10;
+        const AUTO_LOAD_MIN_PER_CORE_A = 2.5;
+        const AUTO_LOAD_MIN_FLOOR_A = 20;
 
         updateOffsetInputs();
+        updateLoadThresholdMode();
         document.getElementById('csvText').addEventListener('input', () => {
             uploadedCsvText = '';
             uploadedCsvName = '';
@@ -850,6 +865,16 @@
         function updateCoreCountMode() {
             updateCoreCountLabel();
             updateOffsetInputs();
+        }
+
+        function updateLoadThresholdMode() {
+            const mode = document.getElementById('loadThresholdMode').value;
+            const input = document.getElementById('minCurrent');
+            const note = document.getElementById('loadThresholdNote');
+            input.disabled = mode !== 'manual';
+            note.textContent = mode === 'manual'
+                ? 'Use this only when you know the current range for the workload.'
+                : 'Auto keeps the high-current load range and skips idle/light rows.';
         }
 
         function resolveCoreCount() {
@@ -1519,7 +1544,8 @@
             const analysisId = ++activeAnalysisId;
             clearTimeout(autoAnalyzeTimer);
             const csvText = getActiveCsvText();
-            const minCurrent = parseFloat(document.getElementById('minCurrent').value);
+            const loadThresholdMode = document.getElementById('loadThresholdMode').value;
+            const manualMinCurrent = parseFloat(document.getElementById('minCurrent').value);
             const mvStep = parseFloat(document.getElementById('mvStep').value);
             const currentOffsets = getCurrentOffsets();
             const resultsDiv = document.getElementById('results');
@@ -1530,9 +1556,9 @@
                 return;
             }
 
-            if (!Number.isFinite(minCurrent) || !Number.isFinite(mvStep) || mvStep <= 0) {
+            if (!Number.isFinite(mvStep) || mvStep <= 0 || (loadThresholdMode === 'manual' && !Number.isFinite(manualMinCurrent))) {
                 clearProgress();
-                showError(resultsDiv, 'Minimum current and mV step must be valid numbers.');
+                showError(resultsDiv, 'Load threshold and mV step must be valid numbers.');
                 return;
             }
 
@@ -1579,11 +1605,14 @@
                     throw new Error('Could not find any Core VID columns');
                 }
 
-                const validRows = await filterRowsByCurrentAsync(data.rows, loadSensor, minCurrent, analysisId);
+                const loadThreshold = await resolveLoadThresholdAsync(data.rows, data.headers, loadSensor, coreIndexes, selectedCoreCount, loadThresholdMode, manualMinCurrent, analysisId);
+                ensureAnalysisCurrent(analysisId);
+
+                const validRows = await filterRowsByCurrentAsync(data.rows, loadSensor, loadThreshold.current, analysisId);
                 ensureAnalysisCurrent(analysisId);
 
                 if (validRows.length === 0) {
-                    throw new Error(`No rows found with load current >= ${minCurrent}A using ${loadSensor.note}`);
+                    throw new Error(`No rows found with load current >= ${formatAmps(loadThreshold.current)} using ${loadSensor.note}`);
                 }
 
                 const vidMeans = await calculateVidMeansAsync(validRows, vidCols, analysisId);
@@ -1606,7 +1635,8 @@
                 displayResults(resultsDiv, {
                     totalRows: data.rows.length,
                     validRows: validRows.length,
-                    minCurrent,
+                    minCurrent: loadThreshold.current,
+                    loadThreshold,
                     stdDev: vidStats.stdDev,
                     maxDelta: vidStats.maxHighDelta,
                     correlation,
@@ -1633,6 +1663,158 @@
             }
         }
 
+        async function resolveLoadThresholdAsync(rows, headers, loadSensor, coreIndexes, selectedCoreCount, mode, manualMinCurrent, analysisId) {
+            if (mode === 'manual') {
+                await paintProgress('Load threshold', 45, `Manual >= ${formatAmps(manualMinCurrent)}`);
+                return {
+                    mode: 'manual',
+                    current: manualMinCurrent,
+                    label: `Manual >= ${formatAmps(manualMinCurrent)}`
+                };
+            }
+
+            const usageSensor = resolveLoadUsageSensor(headers, coreIndexes);
+            const samples = await collectLoadSamplesAsync(rows, loadSensor, usageSensor, analysisId);
+            if (samples.length === 0) {
+                throw new Error(`Could not read any load current values from ${loadSensor.note}`);
+            }
+
+            const values = samples.map(sample => sample.current).sort((a, b) => a - b);
+            const p75 = percentileSorted(values, 0.75);
+            const p90 = percentileSorted(values, 0.90);
+            const p95 = percentileSorted(values, 0.95);
+            const maxCurrent = values[values.length - 1];
+            const coreCount = coreIndexes.length || selectedCoreCount;
+            const usefulFloor = getAutoLoadUsefulFloor(coreCount);
+
+            if (maxCurrent < usefulFloor) {
+                throw new Error(`Auto load threshold did not find a heavy CPU load. Highest observed load current was ${formatAmps(maxCurrent)}; expected at least about ${formatAmps(usefulFloor)} for ${coreCount} cores. Collect a heavier workload log or switch Load threshold to Manual current.`);
+            }
+
+            const highUsageValues = usageSensor
+                ? samples
+                    .filter(sample => Number.isFinite(sample.usage) && sample.usage >= AUTO_LOAD_USAGE_MIN)
+                    .map(sample => sample.current)
+                    .sort((a, b) => a - b)
+                : [];
+
+            let method = 'currentDistribution';
+            let thresholdSource = 'current distribution';
+            let thresholdRaw = Math.max(
+                p90,
+                p95 * AUTO_LOAD_P95_RATIO,
+                maxCurrent * AUTO_LOAD_PEAK_RATIO,
+                usefulFloor
+            );
+            const highUsagePeak = highUsageValues.length > 0 ? highUsageValues[highUsageValues.length - 1] : 0;
+
+            if (highUsageValues.length >= AUTO_LOAD_USAGE_MIN_ROWS && highUsagePeak >= usefulFloor) {
+                method = 'cpuUsage';
+                thresholdSource = `${usageSensor.label} >= ${AUTO_LOAD_USAGE_MIN}%`;
+                thresholdRaw = Math.max(
+                    percentileSorted(highUsageValues, 0.10),
+                    usefulFloor
+                );
+            }
+
+            const threshold = roundToTenth(thresholdRaw);
+
+            await paintProgress('Load threshold', 45, `Auto >= ${formatAmps(threshold)} from ${thresholdSource}`);
+            return {
+                mode: 'auto',
+                current: threshold,
+                label: `Auto >= ${formatAmps(threshold)}`,
+                method,
+                thresholdSource,
+                sampleCount: samples.length,
+                highUsageRows: highUsageValues.length,
+                usageThreshold: usageSensor ? AUTO_LOAD_USAGE_MIN : null,
+                usageSensorLabel: usageSensor?.label || '',
+                p75,
+                p90,
+                p95,
+                maxCurrent,
+                usefulFloor
+            };
+        }
+
+        function resolveLoadUsageSensor(headers, coreIndexes) {
+            const aggregateCol = findBestColumn(headers, scoreAggregateCpuUsageHeader);
+            if (aggregateCol) {
+                return {
+                    label: aggregateCol,
+                    kind: 'aggregateUsage',
+                    read: row => parseNumber(row[aggregateCol])
+                };
+            }
+
+            const threadCols = [...new Set(coreIndexes.flatMap(core => findCoreColumns(headers, core, scoreThreadActivityHeader)))];
+            if (threadCols.length === 0) return null;
+
+            return {
+                label: 'per-thread usage average',
+                kind: 'threadUsageAverage',
+                read: row => {
+                    const values = threadCols.map(col => parseNumber(row[col])).filter(Number.isFinite);
+                    return values.length > 0 ? mean(values) : NaN;
+                }
+            };
+        }
+
+        function scoreAggregateCpuUsageHeader(header) {
+            const normalized = normalizeHeader(header);
+            if (!headerHasUnit(header, '%')) return 0;
+            if (containsAny(normalized, ['memory', 'speicher', 'gpu', 'thermal', 'thermisch', 'limit', 'grenzwert', 'ppt', 'tdc', 'edc', 'c0', 'c1', 'c6', 'clock', 'takt'])) return 0;
+            if (!containsAny(normalized, USAGE_TERMS)) return 0;
+            if (!containsAny(normalized, CPU_TERMS) && !containsAny(normalized, CORE_TERMS)) return 0;
+            if (normalized.includes('max') || normalized.includes('thread')) return 0;
+
+            let score = 40;
+            if (containsAny(normalized, ['total', 'gesamt', 'entier', 'totale'])) score += 35;
+            if (isAverageHeader(normalized)) score += 25;
+            if (containsAny(normalized, CPU_TERMS)) score += 15;
+            return score;
+        }
+
+        async function collectLoadSamplesAsync(rows, loadSensor, usageSensor, analysisId) {
+            const samples = [];
+            let lastYield = performance.now();
+
+            for (let i = 0; i < rows.length; i++) {
+                const current = loadSensor.read(rows[i]);
+                if (Number.isFinite(current) && current > 0) {
+                    const usage = usageSensor ? usageSensor.read(rows[i]) : NaN;
+                    samples.push({ current, usage });
+                }
+
+                if (i % 5000 === 0 && performance.now() - lastYield >= ANALYSIS_YIELD_MS) {
+                    ensureAnalysisCurrent(analysisId);
+                    const percent = rows.length > 0 ? 38 + (i / rows.length) * 7 : 45;
+                    setProgress('Choosing load threshold', percent, `${samples.length.toLocaleString()} current samples`);
+                    await yieldToBrowser();
+                    lastYield = performance.now();
+                }
+            }
+
+            const detail = usageSensor
+                ? `${samples.length.toLocaleString()} current samples, usage from ${usageSensor.label}`
+                : `${samples.length.toLocaleString()} current samples`;
+            await paintProgress('Choosing load threshold', 45, detail);
+            return samples;
+        }
+
+        function getAutoLoadUsefulFloor(coreCount) {
+            return Math.max(AUTO_LOAD_MIN_FLOOR_A, coreCount * AUTO_LOAD_MIN_PER_CORE_A);
+        }
+
+        function roundToTenth(value) {
+            return Math.round(value * 10) / 10;
+        }
+
+        function formatAmps(value) {
+            return `${roundToTenth(value).toFixed(1)} A`;
+        }
+
         async function filterRowsByCurrentAsync(rows, loadSensor, minCurrent, analysisId) {
             const validRows = [];
             let lastYield = performance.now();
@@ -1645,7 +1827,7 @@
 
                 if (i % 5000 === 0 && performance.now() - lastYield >= ANALYSIS_YIELD_MS) {
                     ensureAnalysisCurrent(analysisId);
-                    const percent = rows.length > 0 ? 38 + (i / rows.length) * 12 : 50;
+                    const percent = rows.length > 0 ? 45 + (i / rows.length) * 5 : 50;
                     setProgress('Filtering rows', percent, `${validRows.length.toLocaleString()} matched, ${loadSensor.note}`);
                     await yieldToBrowser();
                     lastYield = performance.now();
@@ -2014,6 +2196,11 @@
         function percentile(values, fraction) {
             if (values.length === 0) return 0;
             const sorted = [...values].sort((a, b) => a - b);
+            return percentileSorted(sorted, fraction);
+        }
+
+        function percentileSorted(sorted, fraction) {
+            if (sorted.length === 0) return 0;
             const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * fraction) - 1));
             return sorted[index];
         }
@@ -2097,6 +2284,9 @@
             } else if (results.loadSensor?.kind === 'tdc') {
                 html += `<div class="message warn" style="margin-top: 10px;">Load filtering used CPU TDC because direct CPU core current was not present. Treat row filtering as a fallback estimate.</div>`;
             }
+            if (results.loadThreshold?.mode === 'auto') {
+                html += `<div class="message info" style="margin-top: 10px;">${buildLoadThresholdInfo(results.loadThreshold)}</div>`;
+            }
             if (results.clockStretch?.suspectCount > 0) {
                 html += `<div class="message warn" style="margin-top: 10px;">${buildClockStretchWarning(results.clockStretch)}</div>`;
             }
@@ -2107,7 +2297,7 @@
             html += metricHTML('Correlation', results.correlation.toFixed(3), 'target >= 0.950', correlationStatus);
             html += metricHTML('Scope', scopeLabel, groupCount > 1 ? 'per-CCD baseline' : 'single baseline');
             html += metricHTML('Clock stretch', formatClockStretchMetric(results.clockStretch), 'worst p95 reported/effective gap', clockStretchStatus);
-            html += metricHTML('Load filter', formatLoadSensorMetric(results.loadSensor), `threshold >= ${results.minCurrent} A`);
+            html += metricHTML('Load filter', formatLoadSensorMetric(results.loadSensor), formatLoadThresholdMetric(results.loadThreshold));
             html += '</div>';
 
             html += '<div class="result-grid">';
@@ -2179,6 +2369,14 @@
             return `Possible clock stretching on ${suspectCores}. Treat VID recommendations from this log cautiously; reduce negative CO on suspect cores or verify with another workload before chasing VID balance.`;
         }
 
+        function buildLoadThresholdInfo(loadThreshold) {
+            if (loadThreshold.method === 'cpuUsage') {
+                return `Auto load threshold selected ${formatAmps(loadThreshold.current)} from ${escapeHTML(loadThreshold.thresholdSource)} (${loadThreshold.highUsageRows.toLocaleString()} high-usage rows, peak ${formatAmps(loadThreshold.maxCurrent)}).`;
+            }
+
+            return `Auto load threshold selected ${formatAmps(loadThreshold.current)} from the current distribution because no aggregate CPU usage signal was available (peak ${formatAmps(loadThreshold.maxCurrent)}).`;
+        }
+
         function formatStretchStatus(status) {
             if (status === 'suspect') return 'Suspect';
             if (status === 'watch') return 'Watch';
@@ -2191,6 +2389,22 @@
             if (loadSensor.kind === 'estimatedCurrent') return 'Est. current';
             if (loadSensor.kind === 'tdc') return 'CPU TDC';
             return 'Fallback';
+        }
+
+        function formatLoadThresholdMetric(loadThreshold) {
+            if (!loadThreshold) return 'threshold n/a';
+            if (loadThreshold.mode === 'auto') {
+                const peak = Number.isFinite(loadThreshold.maxCurrent)
+                    ? `, peak ${formatAmps(loadThreshold.maxCurrent)}`
+                    : '';
+                if (loadThreshold.method === 'cpuUsage') {
+                    return `auto >= ${formatAmps(loadThreshold.current)}, CPU usage >= ${loadThreshold.usageThreshold}%${peak}`;
+                }
+
+                return `auto >= ${formatAmps(loadThreshold.current)}, current distribution${peak}`;
+            }
+
+            return `manual >= ${formatAmps(loadThreshold.current)}`;
         }
 
         function getSpreadStatus(stdDev, mvStep) {
