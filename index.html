@@ -2288,9 +2288,6 @@
             } else if (results.loadSensor?.kind === 'tdc') {
                 html += `<div class="message warn" style="margin-top: 10px;">Load filtering used CPU TDC because direct CPU core current was not present. Treat row filtering as a fallback estimate.</div>`;
             }
-            if (results.loadThreshold?.mode === 'auto') {
-                html += `<div class="message info" style="margin-top: 10px;">${buildLoadThresholdInfo(results.loadThreshold)}</div>`;
-            }
             if (results.clockStretch?.suspectCount > 0) {
                 html += `<div class="message warn" style="margin-top: 10px;">${buildClockStretchWarning(results.clockStretch)}</div>`;
             }
@@ -2371,14 +2368,6 @@
                 .map(([core]) => `Core ${core}`)
                 .join(', ');
             return `Possible clock stretching on ${suspectCores}. Treat VID recommendations from this log cautiously; reduce negative CO on suspect cores or verify with another workload before chasing VID balance.`;
-        }
-
-        function buildLoadThresholdInfo(loadThreshold) {
-            if (loadThreshold.method === 'cpuUsage') {
-                return `Auto load threshold selected ${formatAmps(loadThreshold.current)} from ${escapeHTML(loadThreshold.thresholdSource)} (${loadThreshold.highUsageRows.toLocaleString()} high-usage rows, peak ${formatAmps(loadThreshold.maxCurrent)}).`;
-            }
-
-            return `Auto load threshold selected ${formatAmps(loadThreshold.current)} from the current distribution because no aggregate CPU usage signal was available (peak ${formatAmps(loadThreshold.maxCurrent)}).`;
         }
 
         function formatStretchStatus(status) {
