@@ -1704,6 +1704,20 @@
                     .map(sample => sample.current)
                     .sort((a, b) => a - b)
                 : [];
+            const usageValues = usageSensor
+                ? samples
+                    .map(sample => sample.usage)
+                    .filter(Number.isFinite)
+                    .sort((a, b) => a - b)
+                : [];
+            const maxUsage = usageValues.length > 0 ? usageValues[usageValues.length - 1] : NaN;
+
+            if (usageSensor && highUsageValues.length < AUTO_LOAD_USAGE_MIN_ROWS) {
+                const observed = Number.isFinite(maxUsage)
+                    ? ` Highest observed CPU usage was ${roundToTenth(maxUsage).toFixed(1)}%.`
+                    : '';
+                throw new Error(`Auto load threshold did not find enough high-CPU-usage rows from ${usageSensor.label}. Found ${highUsageValues.length.toLocaleString()} rows at or above ${AUTO_LOAD_USAGE_MIN}% CPU usage; expected at least ${AUTO_LOAD_USAGE_MIN_ROWS}.${observed} Run a heavier all-core workload log or switch Load threshold to Manual current if you intentionally want to analyze this light-load data.`);
+            }
 
             let method = 'currentDistribution';
             let thresholdSource = 'current distribution';
@@ -1724,7 +1738,7 @@
                 );
             }
 
-            const threshold = roundToTenth(thresholdRaw);
+            const threshold = roundDownToTenth(Math.min(thresholdRaw, maxCurrent));
 
             await paintProgress('Load threshold', 45, `Auto >= ${formatAmps(threshold)} from ${thresholdSource}`);
             return {
@@ -1816,6 +1830,10 @@
 
         function roundToTenth(value) {
             return Math.round(value * 10) / 10;
+        }
+
+        function roundDownToTenth(value) {
+            return Math.floor(value * 10) / 10;
         }
 
         function formatAmps(value) {
