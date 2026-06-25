@@ -1197,6 +1197,7 @@
         const CPU_TERMS = ['cpu', 'processor', 'prozessor', 'processeur', 'procesador', 'processore'];
         const CORE_TERMS = ['core', 'kern', 'coeur', 'noyau', 'nucleo'];
         const CURRENT_TERMS = ['current', 'strom', 'courant', 'corriente', 'corrente', 'amper'];
+        const CORE_CURRENT_TERMS = ['corecurrent', 'core current', 'kernstrom', 'kern strom', 'courantcoeur', 'courant coeur'];
         const POWER_TERMS = ['power', 'leistung', 'puissance', 'potencia', 'potenza'];
         const VOLTAGE_TERMS = ['voltage', 'spannung', 'tension', 'voltaje', 'tensione'];
         const CLOCK_TERMS = ['clock', 'takt', 'frequenz', 'frequency', 'frequence', 'frecuencia', 'frequencia', 'frequenza'];
@@ -1463,11 +1464,13 @@
             if (!headerHasUnit(header, 'A')) return 0;
             if (!isCpuHeader(normalized) || !normalized.includes('svi3')) return 0;
             if (isExcludedSvi3Rail(normalized)) return 0;
+            if (!containsAny(normalized, CURRENT_TERMS) && !containsAny(normalized, CORE_CURRENT_TERMS) && !normalized.includes('vddcr_vdd') && !normalized.includes('vddcr vdd')) return 0;
 
             let score = 50;
             if (normalized.includes('vddcr_vdd') || normalized.includes('vddcr vdd')) score += 25;
             if (containsAny(normalized, CORE_TERMS)) score += 15;
             if (containsAny(normalized, CURRENT_TERMS)) score += 20;
+            if (containsAny(normalized, CORE_CURRENT_TERMS)) score += 30;
             return score;
         }
 
