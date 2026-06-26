@@ -1680,6 +1680,7 @@
                 const vidStats = calculateVidStats(vidMeans, referenceMeans);
                 const clockStretch = await calculateClockStretchAsync(validRows, data.headers, coreIndexes, analysisId);
                 ensureAnalysisCurrent(analysisId);
+                const limitHeadroom = calculateLimitHeadroom(validRows, data.headers);
                 const recommendations = calculateOffsets(vidMeans, referenceMeans, mvStep, currentOffsets, vidStats);
 
                 await paintProgress('Rendering results', 97, `${validRows.length.toLocaleString()} filtered rows`);
@@ -1700,6 +1701,7 @@
                     currentOffsets,
                     recommendations,
                     clockStretch,
+                    limitHeadroom,
                     loadSensor
                 });
                 setProgress('Analysis complete', 100, `${validRows.length.toLocaleString()} filtered rows`);
@@ -2192,6 +2194,74 @@
             };
         }
 
+        function calculateLimitHeadroom(rows, headers) {
+            const sensors = [
+                { key: 'ppt', label: 'PPT', column: findLimitColumn(headers, 'ppt') },
+                { key: 'tdc', label: 'TDC', column: findLimitColumn(headers, 'tdc') },
+                { key: 'edc', label: 'EDC', column: findLimitColumn(headers, 'edc') },
+                { key: 'thermal', label: 'Thermal', column: findLimitColumn(headers, 'thermal') }
+            ].filter(sensor => sensor.column);
+
+            const summaries = sensors.map(sensor => {
+                const values = rows
+                    .map(row => parseNumber(row[sensor.column]))
+                    .filter(value => Number.isFinite(value) && value >= 0 && value <= 150);
+                if (values.length === 0) return null;
+
+                return {
+                    ...sensor,
+                    rows: values.length,
+                    mean: mean(values),
+                    p95: percentile(values, 0.95),
+                    max: Math.max(...values)
+                };
+            }).filter(Boolean);
+
+            if (summaries.length === 0) {
+                return { available: false, summaries: [], status: 'unknown' };
+            }
+
+            const primary = summaries.reduce((best, item) => {
+                if (!best) return item;
+                return item.p95 > best.p95 ? item : best;
+            }, null);
+
+            let status = 'room';
+            if (primary.p95 >= 98 || primary.max >= 99.5) status = 'bound';
+            else if (primary.p95 >= 90 || primary.max >= 95) status = 'near';
+
+            return {
+                available: true,
+                summaries,
+                primary,
+                status
+            };
+        }
+
+        function findLimitColumn(headers, kind) {
+            return findBestColumn(headers, header => scoreLimitHeader(header, kind));
+        }
+
+        function scoreLimitHeader(header, kind) {
+            const normalized = normalizeHeader(header);
+            if (!normalized.includes('%')) return 0;
+            if (containsAny(normalized, ['gpu', 'memory', 'speicher', 'dram', 'vram', 'hotspot'])) return 0;
+
+            const hasLimit = containsAny(normalized, ['limit', 'grenzwert', 'grenze']);
+            if (!hasLimit) return 0;
+
+            if (kind === 'ppt') return normalized.includes('ppt') ? 100 : 0;
+            if (kind === 'tdc') return normalized.includes('tdc') ? 100 : 0;
+            if (kind === 'edc') return normalized.includes('edc') ? 100 : 0;
+            if (kind === 'thermal') {
+                if (!containsAny(normalized, ['thermal', 'thermisch'])) return 0;
+                if (containsAny(normalized, ['htc', 'prochot'])) return 0;
+                return 80;
+            }
+
+            return 0;
+        }
+
         function findBestCoreColumn(headers, core, scorer) {
             return findBestColumn(headers, header => scorer(header, core));
         }
@@ -2346,6 +2416,7 @@
             const correlationStatus = getCorrelationStatus(results.correlation);
             const guidance = buildGuidance(results, maxDeltaStatus, correlationStatus, rowStatus);
             const clockStretchStatus = getClockStretchStatus(results.clockStretch);
+            const limitHeadroomStatus = getLimitHeadroomStatus(results.limitHeadroom);
 
             let html = '';
             html += `<div class="message ${guidance.kind}">${guidance.text}</div>`;
@@ -2357,6 +2428,9 @@
             if (results.clockStretch?.suspectCount > 0) {
                 html += `<div class="message warn" style="margin-top: 10px;">${buildClockStretchWarning(results.clockStretch)}</div>`;
             }
+            if (results.limitHeadroom?.status === 'bound') {
+                html += `<div class="message info" style="margin-top: 10px;">${buildLimitHeadroomMessage(results.limitHeadroom)}</div>`;
+            }
             html += '<div class="metrics" style="margin-top: 16px;">';
             html += metricHTML('Filtered rows', `${results.validRows}`, `${rowLabel} / ${validPercent}% of log`, rowStatus);
             html += metricHTML('VID std dev', results.stdDev.toFixed(3), 'mV overall spread', spreadStatus);
@@ -2364,6 +2438,7 @@
             html += metricHTML('Correlation', results.correlation.toFixed(3), 'target >= 0.950', correlationStatus);
             html += metricHTML('Scope', scopeLabel, groupCount > 1 ? 'per-CCD baseline' : 'single baseline');
             html += metricHTML('Clock stretch', formatClockStretchMetric(results.clockStretch), 'worst p95 reported/effective gap', clockStretchStatus);
+            html += metricHTML('Limit headroom', formatLimitHeadroomMetric(results.limitHeadroom), formatLimitHeadroomDetail(results.limitHeadroom), limitHeadroomStatus);
             html += metricHTML('Load filter', formatLoadSensorMetric(results.loadSensor), formatLoadThresholdMetric(results.loadThreshold));
             html += '</div>';
 
@@ -2434,6 +2509,32 @@
                 .map(([core]) => `Core ${core}`)
                 .join(', ');
             return `Possible clock stretching on ${suspectCores}. Treat VID recommendations from this log cautiously; reduce negative CO on suspect cores or verify with another workload before chasing VID balance.`;
+        }
+
+        function getLimitHeadroomStatus(limitHeadroom) {
+            if (!limitHeadroom?.available) return '';
+            if (limitHeadroom.status === 'bound') return 'warn';
+            if (limitHeadroom.status === 'near') return 'warn';
+            return 'good';
+        }
+
+        function formatLimitHeadroomMetric(limitHeadroom) {
+            if (!limitHeadroom?.available) return 'n/a';
+            if (limitHeadroom.status === 'bound') return `${limitHeadroom.primary.label} limited`;
+            if (limitHeadroom.status === 'near') return `${limitHeadroom.primary.label} near`;
+            return 'Room';
+        }
+
+        function formatLimitHeadroomDetail(limitHeadroom) {
+            if (!limitHeadroom?.available) return 'no limit columns';
+            return limitHeadroom.summaries
+                .map(item => `${item.label} ${item.p95.toFixed(0)}%`)
+                .join(', ');
+        }
+
+        function buildLimitHeadroomMessage(limitHeadroom) {
+            const detail = formatLimitHeadroomDetail(limitHeadroom);
+            return `Experimental limit readout: ${limitHeadroom.primary.label} is the active limiter in this high-load slice (${detail}). For reliability, validate with a longer warm run before raising limits.`;
         }
 
         function formatStretchStatus(status) {
