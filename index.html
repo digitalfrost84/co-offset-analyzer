@@ -755,6 +755,7 @@
         const AUTO_LOAD_USAGE_MIN_ROWS = 10;
         const AUTO_LOAD_MIN_PER_CORE_A = 2.5;
         const AUTO_LOAD_MIN_FLOOR_A = 20;
+        const CLOCK_STRETCH_MIN_ROWS = 100;
 
         updateOffsetInputs();
         updateLoadThresholdMode();
@@ -2158,7 +2159,8 @@
                 const medianPct = percentile(stretchPct, 0.5);
                 const p95Pct = percentile(stretchPct, 0.95);
                 let status = 'ok';
-                if (medianPct >= 7 || p95Pct >= 10) status = 'suspect';
+                if (stretchPct.length < CLOCK_STRETCH_MIN_ROWS) status = 'lowData';
+                else if (medianPct >= 7 || p95Pct >= 10) status = 'suspect';
                 else if (medianPct >= 4 || p95Pct >= 6) status = 'watch';
 
                 summaries[core] = {
@@ -2435,6 +2437,7 @@
         }
 
         function formatStretchStatus(status) {
+            if (status === 'lowData') return 'Low data';
             if (status === 'suspect') return 'Suspect';
             if (status === 'watch') return 'Watch';
             return 'OK';
