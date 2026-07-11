@@ -1677,6 +1677,9 @@
                 if (validRows.length === 0) {
                     throw new Error(`No rows found with load current >= ${formatAmps(loadThreshold.current)} using ${loadSensor.note}`);
                 }
+                const vidMeans = await calculateVidMeansAsync(validRows, vidCols, analysisId);
+                ensureAnalysisCurrent(analysisId);
+
                 const missingVidCores = vidCols
                     .filter(col => !Number.isFinite(vidMeans[col]))
                     .map(getCoreIndexFromVidColumn)
