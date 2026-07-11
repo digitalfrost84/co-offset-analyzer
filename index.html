@@ -2250,7 +2250,7 @@
                     rows: values.length,
                     mean: mean(values),
                     p95: percentile(values, 0.95),
-                    max: Math.max(...values)
+                    max: values.reduce((maximum, value) => Math.max(maximum, value), -Infinity)
                 };
             }).filter(Boolean);
 
