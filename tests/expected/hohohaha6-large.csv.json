@@ -1,0 +1,64 @@
+{
+  "fixture": "hohohaha6-large.csv",
+  "bytes": 2730085,
+  "headers": 4,
+  "totalRows": 130000,
+  "validRows": 130000,
+  "validPercent": 100,
+  "detectedCoreCount": 2,
+  "analyzedCores": [
+    0,
+    1
+  ],
+  "loadSensor": {
+    "kind": "current",
+    "label": "CPU Core Current (SVI3 TFN) [A]",
+    "note": "direct SVI3 core current"
+  },
+  "loadThreshold": {
+    "mode": "auto",
+    "method": "currentDistribution",
+    "current": 80,
+    "usageThreshold": null,
+    "usageSensorLabel": "",
+    "highUsageRows": 0,
+    "maxCurrent": 80,
+    "p90": 80,
+    "p95": 80
+  },
+  "stats": {
+    "stdDev": 5,
+    "maxHighDelta": 5,
+    "correlation": 0
+  },
+  "groups": {
+    "CPU": [
+      0,
+      1
+    ]
+  },
+  "groupMeans": {
+    "CPU": 1.095
+  },
+  "vidMeans": {
+    "Core 0 VID [V]": 1.1,
+    "Core 1 VID [V]": 1.09
+  },
+  "recommendations": {
+    "0": -2,
+    "1": 0
+  },
+  "limitHeadroom": {
+    "status": "bound",
+    "primary": "ppt",
+    "wholeLogRows": 130000,
+    "wholeLogMax": 99
+  },
+  "clockStretch": {
+    "available": false,
+    "suspectCount": 0,
+    "watchCount": 0,
+    "worstP95Pct": 0,
+    "checkedCores": []
+  }
+}

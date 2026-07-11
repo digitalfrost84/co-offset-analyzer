@@ -1,0 +1,140 @@
+{
+  "fixture": "hwinfo_16core_deutsch.csv",
+  "bytes": 141615,
+  "headers": 239,
+  "totalRows": 88,
+  "validRows": 74,
+  "validPercent": 84.091,
+  "detectedCoreCount": 16,
+  "analyzedCores": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15
+  ],
+  "loadSensor": {
+    "kind": "estimatedCurrent",
+    "label": "CPU Kern-Leistung (SVI3 TFN) [W] / CPU VDDCR_VDD Spannung (SVI3 TFN) [V]",
+    "note": "estimated from SVI3 core power / VDD voltage"
+  },
+  "loadThreshold": {
+    "mode": "auto",
+    "method": "cpuUsage",
+    "current": 149.5,
+    "usageThreshold": 80,
+    "usageSensorLabel": "Gesamte CPU-Auslastung [%]",
+    "highUsageRows": 82,
+    "maxCurrent": 150.884,
+    "p90": 150.661,
+    "p95": 150.75
+  },
+  "stats": {
+    "stdDev": 13.776198,
+    "maxHighDelta": 40.481419,
+    "correlation": 0.985955
+  },
+  "groups": {
+    "CCD1": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "CCD2": [
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ]
+  },
+  "groupMeans": {
+    "CCD1": 1.039519,
+    "CCD2": 1.061796
+  },
+  "vidMeans": {
+    "Core 0 VID [V]": 1.032081,
+    "Core 1 VID [V]": 1.03173,
+    "Core 2 VID [V]": 1.08,
+    "Core 3 VID [V]": 1.049041,
+    "Core 4 VID [V]": 1.031378,
+    "Core 5 VID [V]": 1.033838,
+    "Core 6 VID [V]": 1.027622,
+    "Core 7 VID [V]": 1.030459,
+    "Core 8 VID [V]": 1.055838,
+    "Core 9 VID [V]": 1.080378,
+    "Core 10 VID [V]": 1.062878,
+    "Core 11 VID [V]": 1.060959,
+    "Core 12 VID [V]": 1.070149,
+    "Core 13 VID [V]": 1.067568,
+    "Core 14 VID [V]": 1.04523,
+    "Core 15 VID [V]": 1.051365
+  },
+  "recommendations": {
+    "0": 0,
+    "1": 0,
+    "2": -15,
+    "3": -5,
+    "4": 0,
+    "5": 0,
+    "6": 0,
+    "7": 0,
+    "8": 0,
+    "9": -8,
+    "10": -2,
+    "11": 0,
+    "12": -5,
+    "13": -4,
+    "14": 0,
+    "15": 0
+  },
+  "limitHeadroom": {
+    "status": "bound",
+    "primary": "ppt",
+    "wholeLogRows": 86,
+    "wholeLogMax": 100
+  },
+  "clockStretch": {
+    "available": true,
+    "suspectCount": 0,
+    "watchCount": 0,
+    "worstP95Pct": 0.389,
+    "checkedCores": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ]
+  }
+}

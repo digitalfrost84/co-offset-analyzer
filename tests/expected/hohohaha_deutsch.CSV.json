@@ -1,0 +1,97 @@
+{
+  "fixture": "hohohaha_deutsch.CSV",
+  "bytes": 166079,
+  "headers": 319,
+  "totalRows": 79,
+  "validRows": 54,
+  "validPercent": 68.354,
+  "detectedCoreCount": 8,
+  "analyzedCores": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "loadSensor": {
+    "kind": "current",
+    "label": "CPU-Kernstrom (SVI3 TFN) [A]",
+    "note": "direct SVI3 core current"
+  },
+  "loadThreshold": {
+    "mode": "auto",
+    "method": "cpuUsage",
+    "current": 78.3,
+    "usageThreshold": 80,
+    "usageSensorLabel": "Gesamte CPU-Auslastung [%]",
+    "highUsageRows": 59,
+    "maxCurrent": 80.134,
+    "p90": 79.781,
+    "p95": 80.051
+  },
+  "stats": {
+    "stdDev": 1.51579,
+    "maxHighDelta": 0.94213,
+    "correlation": 0.96824
+  },
+  "groups": {
+    "CPU": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  "groupMeans": {
+    "CPU": 1.069873
+  },
+  "vidMeans": {
+    "Core 0 VID [V]": 1.070611,
+    "Core 1 VID [V]": 1.070352,
+    "Core 2 VID [V]": 1.07063,
+    "Core 3 VID [V]": 1.070815,
+    "Core 4 VID [V]": 1.070056,
+    "Core 5 VID [V]": 1.070389,
+    "Core 6 VID [V]": 1.065907,
+    "Core 7 VID [V]": 1.070222
+  },
+  "recommendations": {
+    "0": 0,
+    "1": 0,
+    "2": 0,
+    "3": 0,
+    "4": 0,
+    "5": 0,
+    "6": 0,
+    "7": 0
+  },
+  "limitHeadroom": {
+    "status": "bound",
+    "primary": "ppt",
+    "wholeLogRows": 77,
+    "wholeLogMax": 100.1
+  },
+  "clockStretch": {
+    "available": true,
+    "suspectCount": 0,
+    "watchCount": 0,
+    "worstP95Pct": 0,
+    "checkedCores": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  }
+}
