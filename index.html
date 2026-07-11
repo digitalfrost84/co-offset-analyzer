@@ -1109,7 +1109,11 @@
             const coreCount = resolveCoreCount();
             const offsets = {};
             for (let i = 0; i < coreCount; i++) {
-                const val = parseInt(document.getElementById(`offset${i}`).value) || 0;
+                const input = document.getElementById(`offset${i}`);
+                const val = Number(input.value);
+                if (!Number.isInteger(val) || val < -50 || val > 30) {
+                    throw new Error(`Core ${i} offset must be a whole number from -50 to 30.`);
+                }
                 offsets[i] = val;
             }
             return offsets;
@@ -1286,12 +1290,6 @@
                 if (!groups[label].includes(coreIdx)) groups[label].push(coreIdx);
             });
 
-            if (Object.keys(groups).length === 0 && coreIndexes.length > 8) {
-                const chunkSize = coreIndexes.length <= 16 ? Math.ceil(coreIndexes.length / 2) : 8;
-                for (let i = 0; i < coreIndexes.length; i += chunkSize) {
-                    groups[`CCD${Math.floor(i / chunkSize) + 1}`] = coreIndexes.slice(i, i + chunkSize);
-                }
-            }
 
             if (Object.keys(groups).length === 0) {
                 groups.CPU = [...coreIndexes];
@@ -1344,15 +1342,29 @@
         }
 
         function readCsvLine(text, cursor) {
-            const newlineIndex = text.indexOf('\n', cursor);
-            let lineEnd = newlineIndex === -1 ? text.length : newlineIndex;
+            let inQuotes = false;
+            let lineEnd = text.length;
+
+            for (let i = cursor; i < text.length; i++) {
+                if (text[i] === '"') {
+                    if (inQuotes && text[i + 1] === '"') {
+                        i++;
+                    } else {
+                        inQuotes = !inQuotes;
+                    }
+                } else if (text[i] === '\n' && !inQuotes) {
+                    lineEnd = i;
+                    break;
+                }
+            }
+
             if (lineEnd > cursor && text.charCodeAt(lineEnd - 1) === 13) {
                 lineEnd--;
             }
 
             return {
                 line: text.slice(cursor, lineEnd),
-                nextCursor: newlineIndex === -1 ? text.length : newlineIndex + 1
+                nextCursor: lineEnd >= text.length ? text.length : lineEnd + 1
             };
         }
 
@@ -1665,9 +1677,13 @@
                 if (validRows.length === 0) {
                     throw new Error(`No rows found with load current >= ${formatAmps(loadThreshold.current)} using ${loadSensor.note}`);
                 }
-
-                const vidMeans = await calculateVidMeansAsync(validRows, vidCols, analysisId);
-                ensureAnalysisCurrent(analysisId);
+                const missingVidCores = vidCols
+                    .filter(col => !Number.isFinite(vidMeans[col]))
+                    .map(getCoreIndexFromVidColumn)
+                    .filter(Number.isFinite);
+                if (missingVidCores.length > 0) {
+                    throw new Error(`No usable VID samples for core${missingVidCores.length === 1 ? '' : 's'} ${missingVidCores.join(', ')} in the filtered rows.`);
+                }
 
                 const meanValues = Object.values(vidMeans);
                 const globalMean = meanValues.reduce((a, b) => a + b) / meanValues.length;
@@ -1680,7 +1696,7 @@
                 const vidStats = calculateVidStats(vidMeans, referenceMeans);
                 const clockStretch = await calculateClockStretchAsync(validRows, data.headers, coreIndexes, analysisId);
                 ensureAnalysisCurrent(analysisId);
-                const limitHeadroom = calculateLimitHeadroom(validRows, data.headers);
+                const limitHeadroom = calculateLimitHeadroom(data.rows, validRows, data.headers);
                 const recommendations = calculateOffsets(vidMeans, referenceMeans, mvStep, currentOffsets, vidStats);
 
                 await paintProgress('Rendering results', 97, `${validRows.length.toLocaleString()} filtered rows`);
@@ -2194,7 +2210,7 @@
             };
         }
 
-        function calculateLimitHeadroom(rows, headers) {
+        function calculateLimitHeadroom(allRows, analysisRows, headers) {
             const sensors = [
                 { key: 'ppt', label: 'PPT', column: findLimitColumn(headers, 'ppt') },
                 { key: 'tdc', label: 'TDC', column: findLimitColumn(headers, 'tdc') },
@@ -2202,6 +2218,24 @@
                 { key: 'thermal', label: 'Thermal', column: findLimitColumn(headers, 'thermal') }
             ].filter(sensor => sensor.column);
 
+            const wholeLog = summarizeLimitScope(allRows, sensors);
+            const analysis = summarizeLimitScope(analysisRows, sensors);
+
+            if (!wholeLog.available && !analysis.available) {
+                return { available: false, wholeLog, analysis, status: 'unknown' };
+            }
+
+            const primaryScope = wholeLog.available ? wholeLog : analysis;
+            return {
+                available: true,
+                wholeLog,
+                analysis,
+                primary: primaryScope.primary,
+                status: primaryScope.status
+            };
+        }
+
+        function summarizeLimitScope(rows, sensors) {
             const summaries = sensors.map(sensor => {
                 const values = rows
                     .map(row => parseNumber(row[sensor.column]))
@@ -2218,7 +2252,7 @@
             }).filter(Boolean);
 
             if (summaries.length === 0) {
-                return { available: false, summaries: [], status: 'unknown' };
+                return { available: false, summaries: [], primary: null, status: 'unknown' };
             }
 
             const primary = summaries.reduce((best, item) => {
@@ -2260,6 +2294,13 @@
             }
 
             return 0;
+        }
+
+        function findLimitSummary(limitHeadroom, key) {
+            const ranges = mergeLimitScopeRanges(limitHeadroom || {});
+            const ranged = ranges.find(item => item.key === key);
+            if (ranged) return ranged;
+            return limitHeadroom?.primary?.key === key ? limitHeadroom.primary : null;
         }
 
         function findBestCoreColumn(headers, core, scorer) {
@@ -2436,10 +2477,10 @@
             html += metricHTML('VID std dev', results.stdDev.toFixed(3), 'mV overall spread', spreadStatus);
             html += metricHTML('Max high VID delta', results.maxDelta.toFixed(3), `target < ${results.mvStep} mV`, maxDeltaStatus);
             html += metricHTML('Correlation', results.correlation.toFixed(3), 'target >= 0.950', correlationStatus);
-            html += metricHTML('Scope', scopeLabel, groupCount > 1 ? 'per-CCD baseline' : 'single baseline');
             html += metricHTML('Clock stretch', formatClockStretchMetric(results.clockStretch), 'worst p95 reported/effective gap', clockStretchStatus);
             html += metricHTML('Limit headroom', formatLimitHeadroomMetric(results.limitHeadroom), formatLimitHeadroomDetail(results.limitHeadroom), limitHeadroomStatus);
             html += metricHTML('Load filter', formatLoadSensorMetric(results.loadSensor), formatLoadThresholdMetric(results.loadThreshold));
+            html += metricHTML('Scope', scopeLabel, groupCount > 1 ? 'per-CCD baseline' : 'single baseline');
             html += '</div>';
 
             html += '<div class="result-grid">';
@@ -2513,9 +2554,10 @@
 
         function getLimitHeadroomStatus(limitHeadroom) {
             if (!limitHeadroom?.available) return '';
-            if (limitHeadroom.status === 'bound') return 'warn';
-            if (limitHeadroom.status === 'near') return 'warn';
-            return 'good';
+            if (limitHeadroom.status === 'room') return 'good';
+            if (limitHeadroom.primary?.key === 'thermal') return 'bad';
+            if (limitHeadroom.primary?.key === 'ppt') return 'good';
+            return 'warn';
         }
 
         function formatLimitHeadroomMetric(limitHeadroom) {
@@ -2527,14 +2569,40 @@
 
         function formatLimitHeadroomDetail(limitHeadroom) {
             if (!limitHeadroom?.available) return 'no limit columns';
-            return limitHeadroom.summaries
-                .map(item => `${item.label} ${item.p95.toFixed(0)}%`)
+            return mergeLimitScopeRanges(limitHeadroom)
+                .map(item => {
+                    if (item.low === item.high) return `${item.label} ${item.high}%`;
+                    return `${item.label} ${item.low}-${item.high}%`;
+                })
                 .join(', ');
         }
 
         function buildLimitHeadroomMessage(limitHeadroom) {
             const detail = formatLimitHeadroomDetail(limitHeadroom);
-            return `Experimental limit readout: ${limitHeadroom.primary.label} is the active limiter in this high-load slice (${detail}). For reliability, validate with a longer warm run before raising limits.`;
+            return `Experimental limit readout: ${limitHeadroom.primary.label} is the active limiter across the log (${detail}). For reliability, validate with a longer warm run before raising limits.`;
+        }
+
+        function mergeLimitScopeRanges(limitHeadroom) {
+            const byKey = new Map();
+            [limitHeadroom.wholeLog, limitHeadroom.analysis].forEach(scope => {
+                if (!scope?.available) return;
+                scope.summaries.forEach(item => {
+                    const rounded = Math.round(item.p95);
+                    const existing = byKey.get(item.key) || {
+                        key: item.key,
+                        label: item.label,
+                        low: rounded,
+                        high: rounded
+                    };
+                    existing.low = Math.min(existing.low, rounded);
+                    existing.high = Math.max(existing.high, rounded);
+                    byKey.set(item.key, existing);
+                });
+            });
+
+            return ['ppt', 'tdc', 'edc', 'thermal']
+                .map(key => byKey.get(key))
+                .filter(Boolean);
         }
 
         function formatStretchStatus(status) {
