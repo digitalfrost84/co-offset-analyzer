@@ -4,6 +4,8 @@ A single-file browser tool for producing per-core AMD Ryzen Curve Optimizer reco
 
 The analyzer runs entirely in your browser. CSV data is processed locally and is not uploaded anywhere.
 
+`index.html` is the current V2 interface. The original interface remains available as `index-v1.html`, and `index-v2.html` is retained as a stable direct link.
+
 ## Features
 
 - Reads HWiNFO64 CSV logs from file upload or pasted text
