@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CO Offset Analyzer</title>
+    <title>CO Offset Analyzer — V2</title>
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <style>
         :root {
@@ -627,6 +627,7 @@
             }
         }
     </style>
+    <link rel="stylesheet" href="v2.css">
 </head>
 <body>
     <main class="app">
@@ -635,7 +636,7 @@
                 <p class="eyebrow">Curve Optimizer</p>
                 <h1>CO Offset Analyzer</h1>
             </div>
-            <div id="status" class="status-pill">Waiting for CSV data</div>
+            <div id="status" class="status-pill" role="status" aria-live="polite">Waiting for data</div>
         </header>
 
         <div class="layout">
@@ -710,19 +711,21 @@
                             <button type="button" class="ghost-btn" onclick="nudgeAllOffsets(-1)">-1</button>
                             <button type="button" class="ghost-btn" onclick="nudgeAllOffsets(1)">+1</button>
                             <button type="button" class="ghost-btn" onclick="pasteOffsetsFromClipboard()">Paste</button>
-                            <button type="button" class="ghost-btn" onclick="resetOffsets()">Reset</button>
                         </div>
                     </div>
                     <div id="offsetInputs" class="offset-inputs"></div>
                 </div>
 
-                <div class="section">
+                <details class="source-details">
+                    <summary>Paste CSV instead</summary>
                     <label for="csvText">CSV content</label>
                     <textarea id="csvText" placeholder="Paste HWiNFO64 CSV data here..."></textarea>
-                    <div class="actions">
-                        <button id="analyzeButton" class="primary-btn" onclick="analyzeData()">Analyze</button>
-                        <button type="button" class="ghost-btn" onclick="clearCsv()">Clear</button>
-                    </div>
+                    <button type="button" class="ghost-btn" onclick="clearCsv()">Clear pasted data</button>
+                </details>
+
+                <div class="actions">
+                    <button id="analyzeButton" class="primary-btn" onclick="analyzeData()">Analyze</button>
+                    <button type="button" class="ghost-btn" onclick="resetOffsets()">Reset</button>
                 </div>
             </section>
 
@@ -730,8 +733,8 @@
                 <div id="results" class="empty-state">
                     <div class="empty-state-inner">
                         <div class="empty-icon">CO</div>
-                        <h2>Ready to analyze</h2>
-                        <p>Per-core recommendations will appear after a valid HWiNFO64 CSV is loaded.</p>
+                        <h2>Ready</h2>
+                        <p>Choose a HWiNFO log or paste CSV data to begin.</p>
                     </div>
                 </div>
             </section>
@@ -1031,12 +1034,16 @@
 
         function useRecommendationsAsCurrent() {
             if (!latestRecommendations) {
-                setStatus('No actionable trial offsets to use');
+                setStatus('No recommended offsets to use');
                 return;
             }
 
-            const applied = applyOffsetsToInputs(latestRecommendations);
-            setStatus(`Applied ${applied} trial offsets as current`);
+            const changed = Object.entries(latestRecommendations).filter(([core, offset]) => {
+                const input = document.getElementById(`offset${core}`);
+                return input && (parseInt(input.value) || 0) !== offset;
+            }).length;
+            applyOffsetsToInputs(latestRecommendations);
+            setStatus(`Set ${changed} recommended offset${changed === 1 ? '' : 's'} as current`);
         }
 
         function clearCsv() {
@@ -1085,7 +1092,7 @@
                 reader.onerror = function() {
                     if (analysisId !== activeAnalysisId) return;
                     clearProgress();
-                    showError(document.getElementById('results'), `Could not read ${file.name}`);
+                    showErrorV2(document.getElementById('results'), `Could not read ${file.name}`);
                 };
                 reader.onload = async function(e) {
                     if (analysisId !== activeAnalysisId) return;
@@ -1621,13 +1628,13 @@
 
             if (!hasCsvContent(csvText)) {
                 clearProgress();
-                showError(resultsDiv, 'Please upload or paste CSV data.');
+                showErrorV2(resultsDiv, 'Please upload or paste CSV data.');
                 return;
             }
 
             if (!Number.isFinite(mvStep) || mvStep <= 0 || (loadThresholdMode === 'manual' && !Number.isFinite(manualMinCurrent))) {
                 clearProgress();
-                showError(resultsDiv, 'Load threshold and mV step must be valid numbers.');
+                showErrorV2(resultsDiv, 'Load threshold and mV step must be valid numbers.');
                 return;
             }
 
@@ -1726,7 +1733,7 @@
                     ? calculateOffsets(vidMeans, referenceBaselines, mvStep, currentOffsets, vidStats) : preserveCurrentOffsets(vidMeans, currentOffsets);
 
                 await paintProgress('Rendering results', 97, `${validRows.length.toLocaleString()} filtered rows`);
-                displayResults(resultsDiv, {
+                displayResultsV2(resultsDiv, {
                     totalRows: data.rows.length,
                     validRows: validRows.length,
                     minCurrent: loadThreshold.current,
@@ -1748,10 +1755,11 @@
                     railContext
                 });
                 setProgress('Analysis complete', 100, `${validRows.length.toLocaleString()} filtered rows`);
+                setStatus(`Analysis complete · ${validRows.length.toLocaleString()} rows`);
             } catch (error) {
                 if (error.cancelled) return;
                 clearProgress();
-                showError(resultsDiv, error.message);
+                showErrorV2(resultsDiv, error.message);
             } finally {
                 if (analysisId === activeAnalysisId) {
                     setAnalysisBusy(false);
@@ -2475,6 +2483,12 @@
             setStatus('Needs attention');
         }
 
+        function showErrorV2(container, message) {
+            container.className = 'result-v2-host';
+            container.innerHTML = `<div class="message error" role="alert">Error: ${escapeHTML(message)}</div>`;
+            setStatus('Needs attention');
+        }
+
         function escapeHTML(value) {
             return String(value).replace(/[&<>"']/g, char => ({
                 '&': '&amp;',
@@ -2515,7 +2529,7 @@
             if (!text) return;
 
             navigator.clipboard.writeText(text).then(() => {
-                setStatus('Trial offsets copied');
+                setStatus('Recommended offsets copied');
             }).catch(() => {
                 setStatus('Copy unavailable');
             });
@@ -2810,6 +2824,224 @@
                     <div class="metric-unit">${unit}</div>
                 </div>
             `;
+        }
+
+        function formatV2Signed(value, digits = 2) {
+            if (!Number.isFinite(value)) return '—';
+            return `${value >= 0 ? '+' : '−'}${Math.abs(value).toFixed(digits)}`;
+        }
+
+        function formatV2Axis(value) {
+            if (!Number.isFinite(value)) return '—';
+            const absolute = Math.abs(value);
+            const number = Number.isInteger(absolute) ? absolute.toFixed(0) : absolute.toFixed(1);
+            if (value === 0) return '0';
+            return `${value > 0 ? '+' : '−'}${number}`;
+        }
+
+        function calculateV2Decision(results, changedRecommendations) {
+            if (!results.recommendationGate?.actionable) {
+                return {
+                    title: 'No trial generated',
+                    subtitle: results.recommendationGate?.reason || 'This log does not meet the analysis gate.'
+                };
+            }
+
+            if (changedRecommendations.length === 0) {
+                const belowStep = results.maxDelta < results.mvStep;
+                return {
+                    title: 'No changes recommended',
+                    subtitle: belowStep
+                        ? `All high-side residuals are below the ${results.mvStep.toFixed(1)} mV step.`
+                        : 'Current offsets remain the bounded result for this log.'
+                };
+            }
+
+            const cores = changedRecommendations.map(([core]) => `C${core}`).join(', ');
+            return {
+                title: `${changedRecommendations.length} offset${changedRecommendations.length === 1 ? '' : 's'} to apply`,
+                subtitle: `Apply ${cores}, then repeat the same measurement.`
+            };
+        }
+
+        function buildV2ResidualPlot(results, sortedVid) {
+            const residuals = sortedVid.map(([column, vid]) => {
+                const core = getCoreIndexFromVidColumn(column);
+                const baseline = core === null ? NaN : results.referenceBaselines[core];
+                return {
+                    core,
+                    group: core === null ? '' : getCoreGroupLabel(results.groups, core),
+                    vid,
+                    delta: Number.isFinite(baseline) ? (vid - baseline) * 1000 : NaN
+                };
+            }).filter(item => item.core !== null && Number.isFinite(item.delta));
+
+            if (residuals.length === 0) return '';
+
+            const values = residuals.map(item => item.delta);
+            let axisMin = Math.floor(Math.min(...values, -results.mvStep * 2) - 0.5);
+            let axisMax = Math.ceil(Math.max(...values, results.mvStep + 1) + 0.5);
+            if (axisMax - axisMin < 6) axisMax = axisMin + 6;
+            const span = axisMax - axisMin;
+            const position = value => Math.max(0, Math.min(100, ((value - axisMin) / span) * 100));
+            const zero = position(0);
+            const threshold = position(results.mvStep);
+
+            let html = '<section class="residual-section">';
+            html += '<h2 class="result-label">Core VID residuals</h2>';
+            html += '<div class="residual-table">';
+            residuals.forEach(item => {
+                const groupSuffix = Object.keys(results.groups).length > 1 ? ` · ${escapeHTML(item.group)}` : '';
+                html += `
+                    <div class="residual-row">
+                        <div class="residual-core">C${item.core}${groupSuffix}</div>
+                        <div class="residual-value">${formatV2Signed(item.delta)} mV</div>
+                        <div class="residual-track" style="--zero:${zero}%;--threshold:${threshold}%;--position:${position(item.delta)}%">
+                            <span class="residual-dot ${item.delta >= results.mvStep ? 'high' : ''}" aria-hidden="true"></span>
+                        </div>
+                    </div>`;
+            });
+            html += `
+                <div class="residual-axis">
+                    <span></span><span></span>
+                    <div class="axis-track">
+                        <span class="axis-mark" style="left:0%">${formatV2Axis(axisMin)}</span>
+                        <span class="axis-mark" style="left:${zero}%">0</span>
+                        <span class="axis-mark threshold" style="left:${threshold}%">+${results.mvStep.toFixed(1)} mV</span>
+                        <span class="axis-mark" style="left:100%">${formatV2Axis(axisMax)}</span>
+                    </div>
+                </div>`;
+            html += '</div></section>';
+            return html;
+        }
+
+        function buildV2Summary(results) {
+            const vidValues = Object.values(results.vidMeans).filter(Number.isFinite);
+            const medianVid = vidValues.length > 0 ? median(vidValues) : NaN;
+            const current = results.railContext?.available
+                ? results.railContext.meanCurrent
+                : results.loadThreshold?.current;
+            const railVoltage = results.railContext?.available ? results.railContext.meanVoltage : NaN;
+            const stats = [
+                ['Median VID', Number.isFinite(medianVid) ? `${medianVid.toFixed(4)} V` : '—'],
+                ['Load', Number.isFinite(current) ? `${current.toFixed(1)} A` : '—'],
+                ['VDD', Number.isFinite(railVoltage) ? `${railVoltage.toFixed(4)} V` : '—'],
+                ['Rows', results.validRows.toLocaleString()]
+            ];
+
+            return `<div class="summary-strip">${stats.map(([label, value]) => `
+                <div class="summary-stat">
+                    <span class="summary-stat-label">${label}</span>
+                    <strong class="summary-stat-value">${value}</strong>
+                </div>`).join('')}</div>`;
+        }
+
+        function buildV2Limits(limitHeadroom) {
+            if (!limitHeadroom?.available) return '';
+            const source = limitHeadroom.analysis?.summaries?.length
+                ? limitHeadroom.analysis.summaries
+                : limitHeadroom.wholeLog?.summaries || [];
+            const order = ['ppt', 'tdc', 'edc', 'thermal'];
+            const limits = [...source].sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key));
+            if (limits.length === 0) return '';
+
+            return `
+                <section class="limits-v2">
+                    <h2 class="limits-title">Limits</h2>
+                    ${limits.map(item => {
+                        const value = Math.max(0, Math.min(100, item.p95));
+                        return `<div class="limit-row">
+                            <span>${escapeHTML(item.label)}</span>
+                            <div class="limit-track"><div class="limit-fill" style="width:${value}%"></div></div>
+                            <span>${Math.round(item.p95)}%</span>
+                        </div>`;
+                    }).join('')}
+                </section>`;
+        }
+
+        function buildV2Details(results) {
+            const groupCount = Object.keys(results.groups).length;
+            const scope = groupCount > 1 ? `${groupCount} CCD groups` : 'Whole CPU';
+            let clockTable = '';
+            if (results.clockStretch?.available) {
+                clockTable = `
+                    <h3>Clock stretching</h3>
+                    <table><thead><tr><th>Core</th><th>Rows</th><th>Median gap</th><th>P95 gap</th><th>Status</th></tr></thead><tbody>
+                    ${Object.entries(results.clockStretch.summaries)
+                        .sort((a, b) => parseInt(a[0]) - parseInt(b[0]))
+                        .map(([core, item]) => `<tr><td>Core ${core}</td><td>${item.rows}</td><td>${item.medianPct.toFixed(1)}%</td><td>${item.p95Pct.toFixed(1)}%</td><td>${formatStretchStatus(item.status)}</td></tr>`)
+                        .join('')}
+                    </tbody></table>`;
+            }
+
+            return `
+                <details class="advanced-results">
+                    <summary>Analysis details</summary>
+                    <div class="detail-grid">
+                        <span>Scope</span><strong>${scope}</strong>
+                        <span>Load filter</span><strong>${formatLoadThresholdMetric(results.loadThreshold)}</strong>
+                        <span>VID co-movement</span><strong>${results.correlation.toFixed(3)}</strong>
+                        <span>Clock gap</span><strong>${formatClockStretchMetric(results.clockStretch)}</strong>
+                    </div>
+                    ${clockTable}
+                </details>`;
+        }
+
+        function displayResultsV2(container, results) {
+            latestRecommendations = results.recommendationGate?.actionable ? { ...results.recommendations } : null;
+            const sortedVid = Object.entries(results.vidMeans).sort((a, b) => {
+                const aCore = getCoreIndexFromVidColumn(a[0]) ?? 0;
+                const bCore = getCoreIndexFromVidColumn(b[0]) ?? 0;
+                return aCore - bCore;
+            });
+            const sortedRecommendations = Object.entries(results.recommendations)
+                .sort((a, b) => parseInt(a[0]) - parseInt(b[0]));
+            const changedRecommendations = sortedRecommendations.filter(([core, value]) => {
+                const current = results.currentOffsets[core] || 0;
+                return value !== current;
+            });
+            const decision = calculateV2Decision(results, changedRecommendations);
+            const copyText = buildCopyText(results.recommendations, results.groups);
+            const notes = [];
+            if (results.loadSensor?.kind === 'estimatedCurrent') notes.push('Load source: SVI3 power ÷ voltage');
+            if (results.loadSensor?.kind === 'tdc') notes.push('Load source: CPU TDC');
+            if (results.clockStretch?.suspectCount > 0) notes.push(buildClockStretchWarning(results.clockStretch));
+
+            const actionButtons = results.recommendationGate?.actionable
+                ? changedRecommendations.length > 0
+                    ? '<button type="button" class="primary-btn" onclick="copyRecommendations()">Copy offsets</button><button type="button" class="ghost-btn" onclick="useRecommendationsAsCurrent()">I applied them</button>'
+                    : '<button type="button" class="ghost-btn" onclick="copyRecommendations()">Copy current values</button>'
+                : '';
+            const trialList = changedRecommendations.length > 0
+                ? `<div class="trial-list-v2">${changedRecommendations.map(([core, value]) => {
+                    const current = results.currentOffsets[core] || 0;
+                    return `<span><strong>C${core}</strong> ${current} → ${value}</span>`;
+                }).join('')}</div>`
+                : '';
+
+            container.className = 'result-v2-host';
+            container.innerHTML = `
+                <div class="result-v2">
+                    <header class="result-head" role="status" aria-live="polite" aria-atomic="true">
+                        <h2 class="result-headline">${escapeHTML(decision.title)}</h2>
+                        <p class="result-subtitle">${escapeHTML(decision.subtitle)}</p>
+                    </header>
+                    ${notes.length > 0 ? `<div class="result-notes">${notes.map(note => `<span>${escapeHTML(note)}</span>`).join('')}</div>` : ''}
+                    ${buildV2ResidualPlot(results, sortedVid)}
+                    ${buildV2Summary(results)}
+                    ${buildV2Limits(results.limitHeadroom)}
+                    <div class="result-actions-v2">
+                        <div>
+                            ${changedRecommendations.length > 0 ? '<div class="next-step-kicker">Next</div>' : ''}
+                            <div class="offset-decision">${changedRecommendations.length > 0 ? 'Apply these offsets' : 'Current offsets unchanged'}</div>
+                            ${changedRecommendations.length > 0 ? '<p class="next-step-copy">Then repeat the same workload with a fresh HWiNFO log.</p>' : ''}
+                            ${trialList}
+                        </div>
+                        <div class="button-row">${actionButtons}</div>
+                    </div>
+                    <pre id="copyText" class="copy-box">${escapeHTML(copyText)}</pre>
+                    ${buildV2Details(results)}
+                </div>`;
         }
     </script>
 </body>

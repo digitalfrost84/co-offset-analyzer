@@ -1,0 +1,96 @@
+{
+  "fixture": "bench_for_CO_Offset_Analyzer.CSV",
+  "headers": 321,
+  "totalRows": 234,
+  "validRows": 191,
+  "validPercent": 81.624,
+  "detectedCoreCount": 8,
+  "analyzedCores": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "loadSensor": {
+    "kind": "current",
+    "label": "CPU-Kernstrom (SVI3 TFN) [A]",
+    "note": "SVI3 TFN VDDCR_VDD rail current (all cores)"
+  },
+  "loadThreshold": {
+    "mode": "auto",
+    "method": "cpuUsage",
+    "current": 110,
+    "usageThreshold": 80,
+    "usageSensorLabel": "Gesamte CPU-Auslastung [%]",
+    "highUsageRows": 210,
+    "maxCurrent": 116.295,
+    "p90": 114.272,
+    "p95": 115.643
+  },
+  "stats": {
+    "stdDev": 0.375953,
+    "maxHighDelta": 0.445026,
+    "correlation": 0.794068
+  },
+  "groups": {
+    "CPU": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  "groupBaselines": {
+    "CPU": 0.989869
+  },
+  "vidMeans": {
+    "Core 0 VID [V]": 0.989031,
+    "Core 1 VID [V]": 0.989581,
+    "Core 2 VID [V]": 0.989738,
+    "Core 3 VID [V]": 0.990314,
+    "Core 4 VID [V]": 0.989686,
+    "Core 5 VID [V]": 0.99,
+    "Core 6 VID [V]": 0.990105,
+    "Core 7 VID [V]": 0.990026
+  },
+  "recommendations": {
+    "0": 0,
+    "1": 0,
+    "2": 0,
+    "3": 0,
+    "4": 0,
+    "5": 0,
+    "6": 0,
+    "7": 0
+  },
+  "limitHeadroom": {
+    "status": "bound",
+    "primary": "thermal",
+    "wholeLogRows": 232,
+    "wholeLogMax": 100
+  },
+  "clockStretch": {
+    "available": true,
+    "suspectCount": 0,
+    "watchCount": 0,
+    "worstP95Pct": 1.378,
+    "checkedCores": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  }
+}
