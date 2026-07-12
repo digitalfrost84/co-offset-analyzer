@@ -5,7 +5,8 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const root = path.resolve(__dirname, '..', '..');
-const v1Path = path.join(root, 'index.html');
+const rootPath = path.join(root, 'index.html');
+const v1Path = path.join(root, 'index-v1.html');
 const v2Path = path.join(root, 'index-v2.html');
 const cssPath = path.join(root, 'v2.css');
 const expectedHashPath = path.join(root, 'tests', 'expected', 'index-v1.sha256');
@@ -155,8 +156,10 @@ function main() {
   const expectedHash = fs.readFileSync(expectedHashPath, 'utf8').trim();
   assert.equal(v1Hash, expectedHash, 'V1 changed while implementing V2');
 
+  const rootHtml = fs.readFileSync(rootPath, 'utf8');
   const html = fs.readFileSync(v2Path, 'utf8');
   const css = fs.readFileSync(cssPath, 'utf8');
+  assert.equal(rootHtml, html, 'Pages root must publish the V2 interface');
   assert.match(html, /<title>CO Offset Analyzer — V2<\/title>/);
   assert.match(html, /href="v2\.css"/);
   assert.match(css, /--accent:\s*#d58f0b/i);
@@ -201,6 +204,7 @@ function main() {
   assert.match(errorContainer.innerHTML, /role="alert"/);
 
   console.log('PASS V1 preserved');
+  console.log('PASS Pages root publishes V2');
   console.log('PASS V2 DOM contract');
   console.log('PASS V2 no-change renderer');
   console.log('PASS V2 actionable renderer');
