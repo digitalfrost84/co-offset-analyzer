@@ -4,7 +4,7 @@ A single-file browser tool for producing per-core AMD Ryzen Curve Optimizer reco
 
 The analyzer runs entirely in your browser. CSV data is processed locally and is not uploaded anywhere.
 
-`index.html` is the current V2 interface. The original interface remains available as `index-v1.html`, and `index-v2.html` is retained as a stable direct link.
+`index.html` is the current interface. To keep a local copy, download [`index.html`](https://raw.githubusercontent.com/digitalfrost84/co-offset-analyzer/main/index.html) together with [`v2.css`](https://raw.githubusercontent.com/digitalfrost84/co-offset-analyzer/main/v2.css) into the same folder.
 
 ## Features
 

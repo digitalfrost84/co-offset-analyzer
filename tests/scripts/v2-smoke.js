@@ -1,15 +1,12 @@
 const assert = require('node:assert/strict');
-const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
 const root = path.resolve(__dirname, '..', '..');
 const rootPath = path.join(root, 'index.html');
-const v1Path = path.join(root, 'index-v1.html');
 const v2Path = path.join(root, 'index-v2.html');
 const cssPath = path.join(root, 'v2.css');
-const expectedHashPath = path.join(root, 'tests', 'expected', 'index-v1.sha256');
 
 class TestElement {
   constructor(id = '') {
@@ -152,10 +149,6 @@ function assertStaticContract(html) {
 }
 
 function main() {
-  const v1Hash = crypto.createHash('sha256').update(fs.readFileSync(v1Path)).digest('hex').toUpperCase();
-  const expectedHash = fs.readFileSync(expectedHashPath, 'utf8').trim();
-  assert.equal(v1Hash, expectedHash, 'V1 changed while implementing V2');
-
   const rootHtml = fs.readFileSync(rootPath, 'utf8');
   const html = fs.readFileSync(v2Path, 'utf8');
   const css = fs.readFileSync(cssPath, 'utf8');
@@ -210,7 +203,6 @@ function main() {
   api.showErrorV2(errorContainer, 'Bad input');
   assert.match(errorContainer.innerHTML, /role="alert"/);
 
-  console.log('PASS V1 preserved');
   console.log('PASS Pages root publishes V2');
   console.log('PASS V2 DOM contract');
   console.log('PASS V2 no-change renderer');

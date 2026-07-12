@@ -21,11 +21,10 @@ Run the regression suite from the repository root:
 node tests/scripts/regression.js
 ```
 
-Verify that the V2 Pages root and preserved V1 interface use the same analysis engine:
+Verify the current Pages interface and renderer:
 
 ```powershell
 node tests/scripts/regression.js
-node tests/scripts/regression.js --page index-v1.html
 node tests/scripts/v2-smoke.js
 ```
 
