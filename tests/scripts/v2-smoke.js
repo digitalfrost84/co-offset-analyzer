@@ -162,7 +162,14 @@ function main() {
   assert.equal(rootHtml, html, 'Pages root must publish the V2 interface');
   assert.match(html, /<title>CO Offset Analyzer — V2<\/title>/);
   assert.match(html, /href="v2\.css"/);
+  assert.match(html, /family=Inter:wght@400\.\.700&amp;family=Recursive:MONO,wght@1,400\.\.700/);
   assert.match(css, /--accent:\s*#d58f0b/i);
+  assert.match(css, /--font-sans:\s*"Inter"/);
+  assert.match(css, /--font-mono:\s*"Recursive"/);
+  assert.match(css, /\.offset-input input\s*\{[^}]*font-family:\s*var\(--font-mono\)/s);
+  assert.match(css, /\.trial-list-v2\s*\{[^}]*font-family:\s*var\(--font-mono\)/s);
+  assert.match(css, /#minCurrent,[^}]*#mvStep\s*\{[^}]*font-family:\s*var\(--font-mono\)/s);
+  assert.match(css, /\.summary-stat-value\s*\{[^}]*font-family:\s*var\(--font-mono\)/s);
   assert.match(css, /\.residual-core\s*\{[^}]*white-space:\s*nowrap/s);
   assertStaticContract(html);
 

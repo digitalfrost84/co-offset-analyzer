@@ -9,6 +9,8 @@
     --accent: #d58f0b;
     --accent-soft: #f1dfb9;
     --danger: #a33b2f;
+    --font-sans: "Inter", "Segoe UI", Arial, sans-serif;
+    --font-mono: "Recursive", "Cascadia Mono", Consolas, monospace;
 }
 
 html {
@@ -19,7 +21,7 @@ body {
     min-width: 320px;
     background: var(--paper);
     color: var(--ink);
-    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    font-family: var(--font-sans);
     font-size: 15px;
     line-height: 1.35;
 }
@@ -172,6 +174,13 @@ input[type="file"] {
     color: var(--muted);
 }
 
+#minCurrent,
+#mvStep {
+    font-family: var(--font-mono);
+    font-variation-settings: "MONO" 1, "CASL" 0;
+    font-weight: 500;
+}
+
 .field-note {
     margin: 5px 0 0;
     color: var(--muted);
@@ -238,6 +247,8 @@ input[type="file"] {
     border: 0;
     background: transparent;
     color: var(--ink);
+    font-family: var(--font-mono);
+    font-variation-settings: "MONO" 1, "CASL" 0;
     font-size: 20px;
     font-weight: 500;
 }
@@ -260,7 +271,8 @@ input[type="file"] {
 
 .source-details textarea {
     min-height: 150px;
-    font-family: "SFMono-Regular", Consolas, monospace;
+    font-family: var(--font-mono);
+    font-variation-settings: "MONO" 1, "CASL" 0;
     font-size: 11px;
 }
 
@@ -510,7 +522,7 @@ button:active {
 
 .summary-stat {
     min-width: 0;
-    padding: 15px 19px 16px 4px;
+    padding: 20px 19px 21px 4px;
     border-right: 1px solid var(--line);
 }
 
@@ -528,7 +540,9 @@ button:active {
 .summary-stat-value {
     display: block;
     color: var(--ink);
-    font-size: clamp(22px, 2.8vw, 34px);
+    font-family: var(--font-mono);
+    font-variation-settings: "MONO" 1, "CASL" 0;
+    font-size: clamp(20px, 2.3vw, 30px);
     font-weight: 520;
     white-space: nowrap;
 }
@@ -589,6 +603,8 @@ button:active {
     flex-wrap: wrap;
     gap: 7px 14px;
     color: var(--muted);
+    font-family: var(--font-mono);
+    font-variation-settings: "MONO" 1, "CASL" 0;
     font-size: 12px;
 }
 
@@ -658,6 +674,8 @@ th {
     height: 1px;
     overflow: hidden;
     clip: rect(0 0 0 0);
+    font-family: var(--font-mono);
+    font-variation-settings: "MONO" 1, "CASL" 0;
     white-space: nowrap;
 }
 
