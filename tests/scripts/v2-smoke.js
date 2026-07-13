@@ -178,7 +178,7 @@ function main() {
   const api = loadV2Renderer();
   const noChange = render(api, baseResults());
   assert.match(noChange, /No changes recommended/);
-  assert.match(noChange, /Core VID residuals/);
+  assert.match(noChange, /CO-normalized VID residuals/);
   assert.match(noChange, /Current offsets unchanged/);
   assert.match(noChange, /id="copyText"/);
   assert.doesNotMatch(noChange, /residual-dot high/);
@@ -206,11 +206,15 @@ function main() {
     return input;
   });
   changedResults.currentOffsets[3] = -15;
+  changedResults.measuredVidMeans = { ...changedResults.vidMeans };
+  changedResults.vidMeans['Core 3 VID [V]'] += 0.045;
+  changedResults.maxDelta = 49.5;
   changedResults.recommendations[3] = -16;
   api.displayResultsV2(liveResults, changedResults);
   offsetInputs.queryResults[3].value = '-30';
   api.refreshRecommendationsFromCurrentOffsets();
-  assert.match(liveResults.innerHTML, /C3<\/strong> -30 → -31/, 'editing a current offset must recompute its final recommendation');
+  assert.match(liveResults.innerHTML, /\+94\.50 mV/, 'changing the measurement CO premise must change the normalized residual');
+  assert.match(liveResults.innerHTML, /C3<\/strong> -30 → -50/, 'editing a current offset must apply normalized residual steps from the entered premise');
 
   const gatedResults = baseResults();
   gatedResults.validRows = 20;

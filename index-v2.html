@@ -1361,6 +1361,14 @@
             return { referenceBaselines, groupBaselines };
         }
 
+        function normalizeVidMeansForOffsets(measuredVidMeans, currentOffsets, mvStep) {
+            return Object.fromEntries(Object.entries(measuredVidMeans).map(([column, measuredVid]) => {
+                const core = getCoreIndexFromVidColumn(column);
+                const offset = core === null ? 0 : (currentOffsets[core] || 0);
+                return [column, measuredVid - (offset * mvStep / 1000)];
+            }));
+        }
+
         function readCsvLine(text, cursor) {
             let inQuotes = false;
             let lineEnd = text.length;
@@ -1729,15 +1737,16 @@
 
                 const groups = resolveAnalysisGroups(data.headers, coreIndexes);
                 await paintProgress('Calculating offsets', 84, `${coreIndexes.length} cores`);
-                const { referenceBaselines, groupBaselines } = calculateReferenceBaselines(vidMeans, groups);
-                const vidStats = calculateVidStats(vidMeans, referenceBaselines);
+                const normalizedVidMeans = normalizeVidMeansForOffsets(vidMeans, currentOffsets, mvStep);
+                const { referenceBaselines, groupBaselines } = calculateReferenceBaselines(normalizedVidMeans, groups);
+                const vidStats = calculateVidStats(normalizedVidMeans, referenceBaselines);
                 const clockStretch = await calculateClockStretchAsync(validRows, data.headers, coreIndexes, analysisId);
                 ensureAnalysisCurrent(analysisId);
                 const limitHeadroom = calculateLimitHeadroom(data.rows, validRows, data.headers);
                 const railContext = calculateRailContext(validRows, data.headers, loadSensor);
                 const recommendationGate = evaluateRecommendationGate(validRows.length, clockStretch);
                 const recommendations = recommendationGate.actionable
-                    ? calculateOffsets(vidMeans, referenceBaselines, mvStep, currentOffsets, vidStats) : preserveCurrentOffsets(vidMeans, currentOffsets);
+                    ? calculateOffsets(normalizedVidMeans, referenceBaselines, mvStep, currentOffsets, vidStats) : preserveCurrentOffsets(normalizedVidMeans, currentOffsets);
 
                 await paintProgress('Rendering results', 97, `${validRows.length.toLocaleString()} filtered rows`);
                 displayResultsV2(resultsDiv, {
@@ -1749,7 +1758,8 @@
                     maxDelta: vidStats.maxHighDelta,
                     correlation,
                     mvStep,
-                    vidMeans,
+                    measuredVidMeans: vidMeans,
+                    vidMeans: normalizedVidMeans,
                     referenceBaselines,
                     groupBaselines,
                     groups,
@@ -2114,18 +2124,28 @@
             if (!latestAnalysisResults) return;
 
             const currentOffsets = getCurrentOffsets();
+            const measuredVidMeans = latestAnalysisResults.measuredVidMeans || latestAnalysisResults.vidMeans;
+            const normalizedVidMeans = normalizeVidMeansForOffsets(measuredVidMeans, currentOffsets, latestAnalysisResults.mvStep);
+            const { referenceBaselines, groupBaselines } = calculateReferenceBaselines(normalizedVidMeans, latestAnalysisResults.groups);
+            const vidStats = calculateVidStats(normalizedVidMeans, referenceBaselines);
             const recommendations = latestAnalysisResults.recommendationGate?.actionable
                 ? calculateOffsets(
-                    latestAnalysisResults.vidMeans,
-                    latestAnalysisResults.referenceBaselines,
+                    normalizedVidMeans,
+                    referenceBaselines,
                     latestAnalysisResults.mvStep,
                     currentOffsets,
-                    { maxHighDelta: latestAnalysisResults.maxDelta }
+                    vidStats
                 )
-                : preserveCurrentOffsets(latestAnalysisResults.vidMeans, currentOffsets);
+                : preserveCurrentOffsets(normalizedVidMeans, currentOffsets);
 
             displayResultsV2(document.getElementById('results'), {
                 ...latestAnalysisResults,
+                measuredVidMeans,
+                vidMeans: normalizedVidMeans,
+                referenceBaselines,
+                groupBaselines,
+                stdDev: vidStats.stdDev,
+                maxDelta: vidStats.maxHighDelta,
                 currentOffsets,
                 recommendations
             });
@@ -2917,7 +2937,7 @@
             const threshold = position(results.mvStep);
 
             let html = '<section class="residual-section">';
-            html += '<h2 class="result-label">Core VID residuals</h2>';
+            html += '<h2 class="result-label">CO-normalized VID residuals</h2>';
             html += '<div class="residual-table">';
             residuals.forEach(item => {
                 const groupSuffix = Object.keys(results.groups).length > 1 ? ` · ${escapeHTML(item.group)}` : '';
@@ -2945,7 +2965,7 @@
         }
 
         function buildV2Summary(results) {
-            const vidValues = Object.values(results.vidMeans).filter(Number.isFinite);
+            const vidValues = Object.values(results.measuredVidMeans || results.vidMeans).filter(Number.isFinite);
             const medianVid = vidValues.length > 0 ? median(vidValues) : NaN;
             const current = results.railContext?.available
                 ? results.railContext.meanCurrent
