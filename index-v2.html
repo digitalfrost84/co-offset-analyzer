@@ -767,7 +767,7 @@
 
         updateOffsetInputs();
         updateLoadThresholdMode();
-        document.getElementById('offsetInputs').addEventListener('change', event => {
+        document.getElementById('offsetInputs').addEventListener('input', event => {
             if (event.target.matches('input[id^="offset"]')) refreshRecommendationsFromCurrentOffsets();
         });
         document.getElementById('csvText').addEventListener('input', () => {

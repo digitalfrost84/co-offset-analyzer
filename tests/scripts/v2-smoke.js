@@ -18,6 +18,7 @@ class TestElement {
     this.disabled = false;
     this.style = {};
     this.children = [];
+    this.queryResults = [];
     this.className = '';
     this.classList = { add: () => {}, remove: () => {} };
   }
@@ -29,7 +30,11 @@ class TestElement {
   }
 
   querySelectorAll() {
-    return [];
+    return this.queryResults;
+  }
+
+  matches(selector) {
+    return selector === 'input[id^="offset"]' && this.id.startsWith('offset');
   }
 }
 
@@ -56,7 +61,9 @@ function createDocumentStub() {
   return {
     getElementById,
     createElement: () => new TestElement(),
-    querySelectorAll: () => []
+    querySelectorAll: selector => selector === '#offsetInputs input'
+      ? getElementById('offsetInputs').queryResults
+      : []
   };
 }
 
@@ -78,7 +85,7 @@ function loadV2Renderer() {
   context.window = context;
   context.globalThis = context;
   vm.runInNewContext(
-    `${scripts[0]}\nglobalThis.__v2 = { displayResultsV2, showErrorV2 };`,
+    `${scripts[0]}\nglobalThis.__v2 = { displayResultsV2, showErrorV2, refreshRecommendationsFromCurrentOffsets, document };`,
     context,
     { filename: 'index-v2.html' }
   );
@@ -155,7 +162,7 @@ function main() {
   assert.equal(rootHtml, html, 'Pages root must publish the V2 interface');
   assert.match(html, /<title>CO Offset Analyzer — V2<\/title>/);
   assert.match(html, /href="v2\.css"/);
-  assert.match(html, /offsetInputs'\)\.addEventListener\('change'/);
+  assert.match(html, /offsetInputs'\)\.addEventListener\('input'/);
   assert.match(html, /function refreshRecommendationsFromCurrentOffsets\(\)/);
   assert.match(html, /family=Inter:wght@400\.\.700&amp;family=Recursive:MONO,wght@1,400\.\.700/);
   assert.match(css, /--accent:\s*#d58f0b/i);
@@ -191,6 +198,20 @@ function main() {
   assert.doesNotMatch(changed, /Trial offsets ready|Use trial/);
   assert.match(changed, /residual-dot high/);
 
+  const liveResults = api.document.getElementById('results');
+  const offsetInputs = api.document.getElementById('offsetInputs');
+  offsetInputs.queryResults = Array.from({ length: 8 }, (_, core) => {
+    const input = api.document.getElementById(`offset${core}`);
+    input.value = core === 3 ? '-15' : '0';
+    return input;
+  });
+  changedResults.currentOffsets[3] = -15;
+  changedResults.recommendations[3] = -16;
+  api.displayResultsV2(liveResults, changedResults);
+  offsetInputs.queryResults[3].value = '-30';
+  api.refreshRecommendationsFromCurrentOffsets();
+  assert.match(liveResults.innerHTML, /C3<\/strong> -30 → -31/, 'editing a current offset must recompute its final recommendation');
+
   const gatedResults = baseResults();
   gatedResults.validRows = 20;
   gatedResults.recommendationGate = {
@@ -209,6 +230,7 @@ function main() {
   console.log('PASS V2 DOM contract');
   console.log('PASS V2 no-change renderer');
   console.log('PASS V2 actionable renderer');
+  console.log('PASS V2 live current-offset recomputation');
   console.log('PASS V2 gated renderer');
   console.log('PASS V2 alert semantics');
 }
