@@ -749,6 +749,7 @@
         let detectTimer = null;
         let autoAnalyzeTimer = null;
         let latestRecommendations = null;
+        let latestAnalysisResults = null;
         let uploadedCsvText = '';
         let uploadedCsvName = '';
         let activeAnalysisId = 0;
@@ -766,6 +767,9 @@
 
         updateOffsetInputs();
         updateLoadThresholdMode();
+        document.getElementById('offsetInputs').addEventListener('change', event => {
+            if (event.target.matches('input[id^="offset"]')) refreshRecommendationsFromCurrentOffsets();
+        });
         document.getElementById('csvText').addEventListener('input', () => {
             uploadedCsvText = '';
             uploadedCsvName = '';
@@ -2106,6 +2110,28 @@
             return preserved;
         }
 
+        function refreshRecommendationsFromCurrentOffsets() {
+            if (!latestAnalysisResults) return;
+
+            const currentOffsets = getCurrentOffsets();
+            const recommendations = latestAnalysisResults.recommendationGate?.actionable
+                ? calculateOffsets(
+                    latestAnalysisResults.vidMeans,
+                    latestAnalysisResults.referenceBaselines,
+                    latestAnalysisResults.mvStep,
+                    currentOffsets,
+                    { maxHighDelta: latestAnalysisResults.maxDelta }
+                )
+                : preserveCurrentOffsets(latestAnalysisResults.vidMeans, currentOffsets);
+
+            displayResultsV2(document.getElementById('results'), {
+                ...latestAnalysisResults,
+                currentOffsets,
+                recommendations
+            });
+            setStatus('Recommendations updated for current offsets');
+        }
+
         function evaluateRecommendationGate(validRowCount, clockStretch) {
             if (validRowCount < MIN_ACTIONABLE_ROWS) {
                 return { actionable: false, reason: `Only ${validRowCount} complete load rows; at least ${MIN_ACTIONABLE_ROWS} are required.` };
@@ -2991,6 +3017,7 @@
         }
 
         function displayResultsV2(container, results) {
+            latestAnalysisResults = results;
             latestRecommendations = results.recommendationGate?.actionable ? { ...results.recommendations } : null;
             const sortedVid = Object.entries(results.vidMeans).sort((a, b) => {
                 const aCore = getCoreIndexFromVidColumn(a[0]) ?? 0;

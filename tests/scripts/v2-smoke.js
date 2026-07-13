@@ -155,6 +155,8 @@ function main() {
   assert.equal(rootHtml, html, 'Pages root must publish the V2 interface');
   assert.match(html, /<title>CO Offset Analyzer — V2<\/title>/);
   assert.match(html, /href="v2\.css"/);
+  assert.match(html, /offsetInputs'\)\.addEventListener\('change'/);
+  assert.match(html, /function refreshRecommendationsFromCurrentOffsets\(\)/);
   assert.match(html, /family=Inter:wght@400\.\.700&amp;family=Recursive:MONO,wght@1,400\.\.700/);
   assert.match(css, /--accent:\s*#d58f0b/i);
   assert.match(css, /--font-sans:\s*"Inter"/);
