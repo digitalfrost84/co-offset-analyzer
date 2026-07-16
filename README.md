@@ -4,7 +4,9 @@ A single-file browser tool for producing per-core AMD Ryzen Curve Optimizer reco
 
 The analyzer runs entirely in your browser. CSV data is processed locally and is not uploaded anywhere.
 
-`index.html` is the current interface. To keep a local copy, download [`index.html`](https://raw.githubusercontent.com/digitalfrost84/co-offset-analyzer/main/index.html) together with [`v2.css`](https://raw.githubusercontent.com/digitalfrost84/co-offset-analyzer/main/v2.css) into the same folder.
+`index.html` is the current V2 interface. The historical V1 interface is available as [`index-v1.html`](https://raw.githubusercontent.com/digitalfrost84/co-offset-analyzer/main/index-v1.html), and both interfaces use the same harmonization engine. To keep V2 locally, download `index.html` together with `v2.css` into the same folder.
+
+The harmonizer targets the relative per-core VID requests observed during the same loaded samples. It predicts how each legal whole-step CO move changes the residual field, then selects the fewest core changes that can bring each CPU/CCD group inside the configured mV-per-step target. A small hysteresis margin prevents dots sitting only just beyond a guide from starting another correction pass.
 
 ## Features
 
@@ -13,7 +15,7 @@ The analyzer runs entirely in your browser. CSV data is processed locally and is
 - Auto-detects CCD groups when HWiNFO exposes `CoreN (CCDx)` temperature columns
 - Supports whole-CPU or per-CCD analysis scopes
 - Produces copy-friendly per-core CO recommendations
-- Leaves low-VID cores unchanged and maps each high-side residual to all complete configured CO steps
+- Uses one shared, bidirectional, offset-aware harmonization engine in V1 and V2
 - Flags probable per-core clock stretching from reported-vs-effective clock gaps
 - Works offline as a standalone `index.html`
 
@@ -21,7 +23,7 @@ The analyzer runs entirely in your browser. CSV data is processed locally and is
 
 1. Open `index.html` in a modern browser.
 2. Upload or paste a HWiNFO64 CSV log.
-3. Review the experimental per-core trial offsets.
+3. Enter the CO offsets that were active while the log was recorded, then review the complete recommended profile.
 4. Stability-test carefully before and after applying values in BIOS or tuning software.
 
 ## Beginner Iteration Guide
@@ -47,7 +49,7 @@ Do not keep appending to the same HWiNFO64 log between iterations. Stop logging 
 
 Stop requesting more VID-alignment trials when:
 
-- No high-side VID residual exceeds the configured step estimate.
+- The tool reports that the residual field is within the configured target or its hysteresis band.
 - A requested direction does not repeat across fresh, matched-condition logs.
 - Performance, power, temperature, clock stretching, or stability gets worse.
 
@@ -59,9 +61,9 @@ Tiny one-step changes can be measurement noise. A direction that repeats across 
 
 For a direct recommendation:
 
-1. Apply the calculated offsets from `0`.
+1. Apply the complete calculated profile shown by the tool.
 2. Ignore one-step changes unless the same core repeats the same direction in a fresh matched log.
-3. Stop the VID-alignment experiment when the tool shows no high-side movement, then perform separate stability testing.
+3. Stop the VID-alignment experiment when the tool shows no harmonization movement, then perform separate stability testing.
 
 ## HWiNFO64 Logging Tips
 
@@ -92,22 +94,22 @@ Load-line calibration changes steady-state droop and transient behavior. Keep LL
 
 ## How Trial Offsets Are Calculated
 
-The tool keeps rows with complete plausible VIDs at the selected loaded operating range, calculates the average VID for each core, then compares each core against a robust group-median baseline:
+The tool keeps rows with complete plausible VIDs at the selected loaded operating range, calculates the average VID for each core, then compares each core against the original V1 arithmetic group-mean baseline:
 
-- `Auto CCD`: each core is compared against its detected CCD median when possible
-- `Whole CPU`: each core is compared against the whole-CPU median
+- `Auto CCD`: each core is compared against its detected CCD mean when possible
+- `Whole CPU`: each core is compared against the whole-CPU mean
 
-The median prevents one unusually low request from pulling an entire CCD toward a low SenseMI state; a lone high requester still stands above the baseline.
-
-Only high-side residuals produce automatic movement. A repeatedly high requesting core can be a shared-rail bottleneck under a tightly controlled all-core workload, but SenseMI may spend a successful CO change on more frequency instead of lower rail voltage.
+Residuals produce relative movement in both directions. A high-requesting core can move more negative; a low-requesting core with an existing negative offset can move less negative. The analyzer predicts each move in whole CO steps and never recommends values outside `-50` through `0`. SenseMI may spend a successful CO change on voltage, frequency, or both, so every applied profile still requires a fresh measurement.
 
 The recommendation logic is:
 
-- If the maximum high-side VID residual is below the configured step estimate, current offsets are preserved.
-- Each core must clear one full configured step; fractional steps are not rounded up.
-- Low-VID cores are left unchanged; their CO is not relaxed from VID alone.
-- A high-side residual is converted to every complete configured CO step, up to the supported CO range.
-- Existing positive offsets are preserved unless a high-side trial moves them downward; the analyzer never creates or increases a positive offset.
+- Each CPU/CCD group is optimized independently.
+- The yellow guides show half of the configured mV-per-step estimate around zero.
+- A core becomes movable only after clearing its guide by the hysteresis margin; a group also needs to clear the target spread by that margin.
+- The engine evaluates predicted whole-step outcomes and chooses the smallest sufficient set of changed cores, then the fewest total CO steps.
+- If an extreme core is pinned at `0` or `-50`, the engine can rebase the other cores together instead of repeatedly chasing the blocked core.
+- If the bounds still make the target impossible, it chooses the tightest attainable residual field instead of changing one arbitrary outlier at a time.
+- High-side residuals move more negative, while low-side residuals may relax an existing negative offset toward zero.
 
 The mV-per-step setting is an empirical response estimate used as a deadband and scale. AMD documents CO as a curve shift but does not guarantee one fixed mV conversion across cores, frequencies, or temperatures. Calibrate it from controlled before/after logs when possible.
 

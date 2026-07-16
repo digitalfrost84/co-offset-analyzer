@@ -13,7 +13,7 @@ Run the synthetic unit suite first:
 node tests/scripts/unit.js
 ```
 
-It covers locale parsing, complete simultaneous VID rows, usage gating, CCD fallback, robust median baselines, high/low outliers, severe clock-stretch gating, full-step deadbands, full residual-to-CO conversion, positive-offset preservation, and CCD isolation.
+It covers locale parsing, complete simultaneous VID rows, usage gating, CCD fallback, the arithmetic-mean baseline, minimal sufficient field harmonization, borderline hysteresis, deterministic selection, bounded field rebasing, bidirectional movement, iterative convergence, output bounds, shared V1/V2 results, and severe clock-stretch gating.
 
 Run the regression suite from the repository root:
 

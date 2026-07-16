@@ -32,8 +32,8 @@
     "p95": 115.643
   },
   "stats": {
-    "stdDev": 0.375953,
-    "maxHighDelta": 0.445026,
+    "stdDev": 0.37131,
+    "maxHighDelta": 0.503927,
     "correlation": 0.794068
   },
   "groups": {
@@ -49,7 +49,7 @@
     ]
   },
   "groupBaselines": {
-    "CPU": 0.989869
+    "CPU": 0.98981
   },
   "vidMeans": {
     "Core 0 VID [V]": 0.989031,

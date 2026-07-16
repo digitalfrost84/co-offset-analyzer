@@ -5,6 +5,7 @@ const vm = require('node:vm');
 
 const root = path.resolve(__dirname, '..', '..');
 const rootPath = path.join(root, 'index.html');
+const v1Path = path.join(root, 'index-v1.html');
 const v2Path = path.join(root, 'index-v2.html');
 const cssPath = path.join(root, 'v2.css');
 
@@ -85,11 +86,35 @@ function loadV2Renderer() {
   context.window = context;
   context.globalThis = context;
   vm.runInNewContext(
-    `${scripts[0]}\nglobalThis.__v2 = { displayResultsV2, showErrorV2, refreshRecommendationsFromCurrentOffsets, document };`,
+    `${scripts[0]}\nglobalThis.__v2 = { displayResultsV2, showErrorV2, refreshRecommendationsFromCurrentOffsets, calculateOffsets, document };`,
     context,
     { filename: 'index-v2.html' }
   );
   return context.__v2;
+}
+
+function loadV1Harmonizer() {
+  const html = fs.readFileSync(v1Path, 'utf8');
+  const scripts = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)].map(match => match[1]);
+  assert.equal(scripts.length, 1, 'V1 must retain one self-contained analysis script');
+  const context = {
+    console,
+    setTimeout,
+    clearTimeout,
+    Promise,
+    performance: { now: () => Date.now() },
+    document: createDocumentStub(),
+    navigator: { clipboard: { readText: async () => '', writeText: async () => {} } },
+    alert: () => {}
+  };
+  context.window = context;
+  context.globalThis = context;
+  vm.runInNewContext(
+    `${scripts[0]}\nglobalThis.__v1 = { calculateOffsets };`,
+    context,
+    { filename: 'index-v1.html' }
+  );
+  return context.__v1;
 }
 
 function baseResults() {
@@ -108,6 +133,7 @@ function baseResults() {
     },
     stdDev: 2.5,
     maxDelta: 2.63,
+    residualRange: 2.95,
     correlation: 0.95,
     mvStep: 3.0,
     vidMeans: Object.fromEntries(cores.map(core => [`Core ${core} VID [V]`, means[core]])),
@@ -141,6 +167,10 @@ function render(api, results) {
   return container.innerHTML;
 }
 
+function plain(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
 function assertStaticContract(html) {
   const staticHtml = html.split('<script>')[0];
   const requiredIds = [
@@ -157,13 +187,22 @@ function assertStaticContract(html) {
 
 function main() {
   const rootHtml = fs.readFileSync(rootPath, 'utf8');
+  const v1Html = fs.readFileSync(v1Path, 'utf8');
   const html = fs.readFileSync(v2Path, 'utf8');
   const css = fs.readFileSync(cssPath, 'utf8');
   assert.equal(rootHtml, html, 'Pages root must publish the V2 interface');
+  assert.match(v1Html, /<title>CO Offset Analyzer<\/title>/, 'the original V1 interface must remain available');
+  assert.match(v1Html, /function calculateOffsets\(vidMeans, referenceMeans, mvStep, currentOffsets, residualRange, groups = null\)/, 'V1 must retain the shared field harmonizer');
   assert.match(html, /<title>CO Offset Analyzer — V2<\/title>/);
   assert.match(html, /href="v2\.css"/);
   assert.match(html, /offsetInputs'\)\.addEventListener\('input'/);
+  assert.match(html, /getElementById\('mvStep'\)\.addEventListener\('input', refreshRecommendationsFromCurrentOffsets\)/);
   assert.match(html, /function refreshRecommendationsFromCurrentOffsets\(\)/);
+  assert.match(html, /const groupBaseline = values\.reduce\(\(sum, value\) => sum \+ value, 0\) \/ values\.length/);
+  assert.match(html, /function calculateOffsets\(vidMeans, referenceBaselines, mvStep, currentOffsets, residualRange, groups = null\)/);
+  assert.match(html, /if \(magnitude <= actionThreshold \+ 1e-9\) return 0/);
+  assert.match(html, /CO offsets used for this log/);
+  assert.match(html, /Enter the values that were active while this CSV was recorded\./);
   assert.match(html, /family=Inter:wght@400\.\.700&amp;family=Recursive:MONO,wght@1,400\.\.700/);
   assert.match(css, /--accent:\s*#d58f0b/i);
   assert.match(css, /--font-sans:\s*"Inter"/);
@@ -176,12 +215,28 @@ function main() {
   assertStaticContract(html);
 
   const api = loadV2Renderer();
+  const v1Api = loadV1Harmonizer();
+  const userResiduals = [-0.97, 1.51, -1.86, 0.40, -0.31, -0.49, 0.37, 1.34];
+  const userCores = userResiduals.map((_, core) => core);
+  const userMeans = Object.fromEntries(userCores.map(core => [`Core ${core} VID [V]`, 1 + userResiduals[core] / 1000]));
+  const userBaselines = Object.fromEntries(userCores.map(core => [core, 1]));
+  const userCurrent = { 0: -19, 1: -11, 2: -19, 3: -20, 4: -19, 5: -13, 6: -24, 7: -23 };
+  const v2UserResult = plain(api.calculateOffsets(userMeans, userBaselines, 3.0, userCurrent, 3.37, { CPU: userCores }));
+  const v1UserResult = plain(v1Api.calculateOffsets(userMeans, userBaselines, 3.0, userCurrent, 3.37, { CPU: userCores }));
+  assert.deepEqual(v2UserResult, { ...userCurrent, 2: -18 }, 'the user example must change only C2');
+  assert.deepEqual(v1UserResult, v2UserResult, 'V1 and V2 must share the same harmonization result');
   const noChange = render(api, baseResults());
   assert.match(noChange, /No changes recommended/);
-  assert.match(noChange, /CO-normalized VID residuals/);
+  assert.match(noChange, /Core VID residuals/);
   assert.match(noChange, /Current offsets unchanged/);
+  assert.match(noChange, /Keep C0 at 0<\/strong><small>unchanged · zero anchor/);
+  assert.match(noChange, /Keep C7 at 0<\/strong><small>unchanged · zero anchor/);
   assert.match(noChange, /id="copyText"/);
   assert.doesNotMatch(noChange, /residual-dot high/);
+  assert.equal((noChange.match(/class="residual-guide lower"/g) || []).length, 8, 'each core row must render the lower half-step guide');
+  assert.equal((noChange.match(/class="residual-guide upper"/g) || []).length, 8, 'each core row must render the upper half-step guide');
+  assert.match(noChange, /−1\.5 mV/, 'the lower guide must be half a CO step below zero');
+  assert.match(noChange, /\+1\.5 mV/, 'the upper guide must be half a CO step above zero');
   assert.doesNotMatch(noChange, /rail context|LLC|experimental/i);
 
   const changedResults = baseResults();
@@ -190,8 +245,10 @@ function main() {
   changedResults.recommendations[3] = -1;
   const changed = render(api, changedResults);
   assert.match(changed, /1 offset to apply/);
-  assert.match(changed, /C3<\/strong> 0 → -1/);
-  assert.match(changed, /Apply these offsets/);
+  assert.match(changed, /Set C3 to -1<\/strong><small>from 0 · 1 step more negative/);
+  assert.match(changed, /Keep C0 at 0<\/strong><small>unchanged · zero anchor/);
+  assert.match(changed, /Keep C7 at 0<\/strong><small>unchanged · zero anchor/);
+  assert.match(changed, /Set these final values/);
   assert.match(changed, /fresh HWiNFO log/);
   assert.match(changed, /Copy offsets/);
   assert.match(changed, /I applied them/);
@@ -213,8 +270,26 @@ function main() {
   api.displayResultsV2(liveResults, changedResults);
   offsetInputs.queryResults[3].value = '-30';
   api.refreshRecommendationsFromCurrentOffsets();
-  assert.match(liveResults.innerHTML, /\+94\.50 mV/, 'changing the measurement CO premise must change the normalized residual');
-  assert.match(liveResults.innerHTML, /C3<\/strong> -30 → -50/, 'editing a current offset must apply normalized residual steps from the entered premise');
+  assert.match(liveResults.innerHTML, /\+4\.81 mV/, 'editing offsets must retain the residuals measured in the loaded log');
+  assert.match(liveResults.innerHTML, /Keep C1 at 0<\/strong><small>unchanged · zero anchor/, 'a low residual pinned at CO zero must remain the rebase anchor');
+  assert.match(liveResults.innerHTML, /Set C3 to -33<\/strong><small>from -30 · 3 steps more negative/, 'the bounded field must rebase C3 toward the pinned low anchor');
+  assert.match(liveResults.innerHTML, /Set C7 to -2<\/strong><small>from 0 · 2 steps more negative/, 'the bounded field must rebase the other movable cores needed to close the interval');
+
+  const beforeMvStepChange = liveResults.innerHTML;
+  const beforeLowerGuide = beforeMvStepChange.match(/class="residual-guide lower" style="left:([0-9.]+)%"/);
+  const beforeUpperGuide = beforeMvStepChange.match(/class="residual-guide upper" style="left:([0-9.]+)%"/);
+  assert.ok(beforeLowerGuide && beforeUpperGuide, 'both plot guides must expose their rendered positions');
+  api.document.getElementById('mvStep').value = '6.0';
+  api.refreshRecommendationsFromCurrentOffsets();
+  assert.notEqual(liveResults.innerHTML, beforeMvStepChange, 'changing mV per CO step must recompute the rendered result');
+  const afterLowerGuide = liveResults.innerHTML.match(/class="residual-guide lower" style="left:([0-9.]+)%"/);
+  const afterUpperGuide = liveResults.innerHTML.match(/class="residual-guide upper" style="left:([0-9.]+)%"/);
+  assert.ok(afterLowerGuide && afterUpperGuide, 'both recomputed plot guides must expose their rendered positions');
+  assert.notEqual(afterLowerGuide[1], beforeLowerGuide[1], 'the lower plot guide must move when mV per CO step changes');
+  assert.notEqual(afterUpperGuide[1], beforeUpperGuide[1], 'the upper plot guide must move when mV per CO step changes');
+  assert.match(liveResults.innerHTML, /−3\.0 mV/, 'the lower plot guide must move to half the edited mV per CO step value');
+  assert.match(liveResults.innerHTML, /\+3\.0 mV/, 'the upper plot guide must move to half the edited mV per CO step value');
+  assert.doesNotMatch(liveResults.innerHTML, /[−+]1\.5 mV/, 'the old half-step guide labels must be replaced after recomputation');
 
   const gatedResults = baseResults();
   gatedResults.validRows = 20;
@@ -232,6 +307,7 @@ function main() {
 
   console.log('PASS Pages root publishes V2');
   console.log('PASS V2 DOM contract');
+  console.log('PASS V1 and V2 shared harmonizer');
   console.log('PASS V2 no-change renderer');
   console.log('PASS V2 actionable renderer');
   console.log('PASS V2 live current-offset recomputation');

@@ -32,8 +32,8 @@
     "p95": 80.051
   },
   "stats": {
-    "stdDev": 1.595403,
-    "maxHighDelta": 0.444444,
+    "stdDev": 1.51579,
+    "maxHighDelta": 0.94213,
     "correlation": 0.96824
   },
   "groups": {
@@ -49,7 +49,7 @@
     ]
   },
   "groupBaselines": {
-    "CPU": 1.07037
+    "CPU": 1.069873
   },
   "vidMeans": {
     "Core 0 VID [V]": 1.070611,
@@ -62,14 +62,14 @@
     "Core 7 VID [V]": 1.070222
   },
   "recommendations": {
-    "0": 0,
-    "1": 0,
-    "2": 0,
-    "3": 0,
-    "4": 0,
-    "5": 0,
+    "0": -1,
+    "1": -1,
+    "2": -1,
+    "3": -1,
+    "4": -1,
+    "5": -1,
     "6": 0,
-    "7": 0
+    "7": -1
   },
   "limitHeadroom": {
     "status": "bound",

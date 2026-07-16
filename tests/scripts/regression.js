@@ -3,7 +3,11 @@ const path = require('path');
 const vm = require('vm');
 
 const root = path.resolve(__dirname, '..', '..');
-const fixtureDir = path.join(root, 'tests', 'fixtures');
+const inputArgIndex = process.argv.indexOf('--input');
+const inputFile = inputArgIndex >= 0 ? path.resolve(process.argv[inputArgIndex + 1] || '') : null;
+const minCurrentArgIndex = process.argv.indexOf('--min-current');
+const diagnosticMinCurrent = minCurrentArgIndex >= 0 ? Number(process.argv[minCurrentArgIndex + 1]) : null;
+const fixtureDir = inputFile ? path.dirname(inputFile) : path.join(root, 'tests', 'fixtures');
 const expectedDir = path.join(root, 'tests', 'expected');
 const update = process.argv.includes('--update');
 const pageArgIndex = process.argv.indexOf('--page');
@@ -13,7 +17,7 @@ if (!pageFile || !/^[\w.-]+\.html$/i.test(pageFile)) {
   throw new Error('--page requires an HTML filename in the repository root');
 }
 
-const fixtures = [
+const fixtures = inputFile ? [path.basename(inputFile)] : [
   'bench_for_CO_Offset_Analyzer.CSV',
   'hohohaha_deutsch.CSV',
   'hwinfo_16core_deutsch.csv',
@@ -171,8 +175,8 @@ async function analyzeFixture(api, fixture) {
     loadSensor,
     coreIndexes,
     selectedCoreCount,
-    'auto',
-    70,
+    Number.isFinite(diagnosticMinCurrent) ? 'manual' : 'auto',
+    Number.isFinite(diagnosticMinCurrent) ? diagnosticMinCurrent : 70,
     analysisId
   );
   const loadRows = await api.filterRowsByCurrentAsync(
@@ -195,7 +199,7 @@ async function analyzeFixture(api, fixture) {
   const clockStretch = await api.calculateClockStretchAsync(validRows, data.headers, coreIndexes, analysisId);
   const limitHeadroom = api.calculateLimitHeadroom(data.rows, validRows, data.headers);
   const currentOffsets = Object.fromEntries(coreIndexes.map(core => [core, 0]));
-  const recommendations = api.calculateOffsets(vidMeans, referenceBaselines, 3.0, currentOffsets, vidStats, groups);
+  const recommendations = api.calculateOffsets(vidMeans, referenceBaselines, 3.0, currentOffsets, vidStats.range, groups);
 
   return {
     fixture,
@@ -270,6 +274,10 @@ async function main() {
   let failures = 0;
   for (const fixture of fixtures) {
     const actual = await analyzeFixture(api, fixture);
+    if (inputFile) {
+      console.log(JSON.stringify(actual, null, 2));
+      continue;
+    }
     const expectedPath = expectedPathFor(fixture);
     const actualJson = `${JSON.stringify(actual, null, 2)}\n`;
 
