@@ -79,6 +79,8 @@ function loadAnalyzerApi() {
 
   const exports = [
     'detectCCDGroups',
+    'selectContiguousLoadRun',
+    'selectAnalysisLoadRunAsync',
     'filterRowsByCurrentAsync',
     'filterRowsWithCompleteVidsAsync',
     'calculateVidMeansAsync',
@@ -86,6 +88,10 @@ function loadAnalyzerApi() {
     'calculateReferenceBaselines',
     'calculateVidStats',
     'calculateClockStretchAsync',
+    'evaluateWindowStability',
+    'selectStableAnalysisRows',
+    'evaluateWindowConsensus',
+    'evaluateRecommendationGate',
     'calculateOffsets'
   ];
   const exportBlock = `\nglobalThis.__api = { ${exports.join(', ')} };\n`;
@@ -102,6 +108,24 @@ function assertClose(actual, expected, tolerance = 1e-12, message = '') {
     Number.isFinite(actual) && Math.abs(actual - expected) <= tolerance,
     message || `expected ${actual} to be within ${tolerance} of ${expected}`
   );
+}
+
+function makeLoadRows(count, { current = 90, usage = 95, prefix = 'row' } = {}) {
+  return Array.from({ length: count }, (_, index) => ({
+    id: `${prefix}-${index}`,
+    current,
+    usage
+  }));
+}
+
+function makeVidWindow(residuals, count, prefix) {
+  return Array.from({ length: count }, (_, rowIndex) => Object.fromEntries([
+    ['id', `${prefix}-${rowIndex}`],
+    ...residuals.map((residual, core) => [
+      `Core ${core} VID [V]`,
+      1 + residual / 1000
+    ])
+  ]));
 }
 
 const tests = [];
@@ -188,6 +212,213 @@ test('auto usage filtering enforces current and usage together', async api => {
   assert.deepEqual(plain(filtered.map(row => row.id)), ['keep']);
 });
 
+test('manual current run selection ignores CPU usage', async api => {
+  const vidCols = ['Core 0 VID [V]', 'Core 1 VID [V]'];
+  const usageColumn = 'Total CPU Usage [%]';
+  const rows = Array.from({ length: 80 }, (_, index) => ({
+    id: `manual-${index}`,
+    current: 90,
+    [usageColumn]: 5,
+    [vidCols[0]]: 1.100,
+    [vidCols[1]]: 1.101
+  }));
+  const headers = ['CPU Core Current (SVI3 TFN) [A]', usageColumn, ...vidCols];
+  const loadSensor = { note: headers[0], read: row => Number(row.current) };
+
+  const selection = await api.selectAnalysisLoadRunAsync(
+    rows,
+    headers,
+    loadSensor,
+    vidCols,
+    [0, 1],
+    2,
+    'manual',
+    80,
+    0
+  );
+
+  assert.equal(selection.validRows.length, 80, 'manual current must keep low-usage rows that meet the current threshold');
+  assert.equal(selection.loadThreshold.mode, 'manual');
+  assert.equal(selection.loadThreshold.usageSensor, null);
+  assert.equal(selection.loadThreshold.usageThreshold, null);
+});
+
+test('contiguous-run selection uses the newest complete load run instead of merging appended runs', async api => {
+  const earlyRun = makeLoadRows(80, { prefix: 'early' });
+  const separator = makeLoadRows(12, { current: 18, usage: 4, prefix: 'idle' });
+  const lateFirstHalf = makeLoadRows(37, { current: 92, usage: 97, prefix: 'late-a' });
+  const bridgedGap = makeLoadRows(1, { current: 55, usage: 30, prefix: 'bridge' });
+  const lateSecondHalf = makeLoadRows(38, { current: 93, usage: 98, prefix: 'late-b' });
+  const trailingIdle = makeLoadRows(5, { current: 12, usage: 2, prefix: 'tail' });
+  const rows = [
+    ...earlyRun,
+    ...separator,
+    ...lateFirstHalf,
+    ...bridgedGap,
+    ...lateSecondHalf,
+    ...trailingIdle
+  ];
+  const loadSensor = { read: row => Number(row.current) };
+  const usageSensor = { read: row => Number(row.usage) };
+
+  const selected = api.selectContiguousLoadRun(
+    rows,
+    loadSensor,
+    80,
+    usageSensor,
+    80,
+    75,
+    1
+  );
+
+  assert.equal(selected.runCount, 2, 'the two measurements must remain distinct runs');
+  assert.equal(selected.matchedRows, 75, 'only qualified rows count toward the minimum');
+  assert.equal(selected.startIndex, earlyRun.length + separator.length);
+  assert.equal(selected.endIndex, earlyRun.length + separator.length + lateFirstHalf.length + bridgedGap.length + lateSecondHalf.length - 1);
+  assert.equal(selected.rows.length, 76, 'the single sampling gap remains inside the selected run boundary');
+  assert.ok(selected.rows.some(row => row.id.startsWith('bridge-')));
+  assert.ok(selected.rows.every(row => !row.id.startsWith('early-')), 'the earlier measurement must not leak into the selected run');
+
+  const filtered = await api.filterRowsByCurrentAsync(selected.rows, loadSensor, 80, 0, usageSensor, 80);
+  assert.equal(filtered.length, 75, 'the later load filter must remove the bridged low-load row before VID statistics');
+  assert.ok(filtered.every(row => row.current >= 80 && row.usage >= 80));
+});
+
+test('contiguous-run selection falls back from an undersized tail to a qualified earlier run', api => {
+  const earlyRun = makeLoadRows(80, { current: 89, usage: 95, prefix: 'qualified' });
+  const separator = makeLoadRows(8, { current: 10, usage: 1, prefix: 'idle' });
+  const shortTail = makeLoadRows(60, { current: 94, usage: 99, prefix: 'short-tail' });
+  const rows = [...earlyRun, ...separator, ...shortTail];
+  const loadSensor = { read: row => Number(row.current) };
+  const usageSensor = { read: row => Number(row.usage) };
+
+  const selected = api.selectContiguousLoadRun(rows, loadSensor, 80, usageSensor, 80, 75, 1);
+
+  assert.equal(selected.runCount, 2);
+  assert.equal(selected.startIndex, 0);
+  assert.equal(selected.endIndex, earlyRun.length - 1);
+  assert.equal(selected.matchedRows, 80);
+  assert.ok(selected.rows.every(row => row.id.startsWith('qualified-')));
+});
+
+test('a repeated CSV header splits adjacent qualifying load runs', api => {
+  const firstRun = makeLoadRows(75, { current: 90, usage: 95, prefix: 'first' });
+  const repeatedHeader = { id: 'id', current: 'current', usage: 'usage' };
+  const secondRun = makeLoadRows(75, { current: 92, usage: 97, prefix: 'second' });
+  const rows = [...firstRun, repeatedHeader, ...secondRun];
+  const loadSensor = { read: row => Number(row.current) };
+  const usageSensor = { read: row => Number(row.usage) };
+
+  const selected = api.selectContiguousLoadRun(rows, loadSensor, 80, usageSensor, 80, 75, 2);
+
+  assert.equal(selected.runCount, 2, 'the repeated header must be a hard measurement boundary');
+  assert.equal(selected.matchedRows, 75, 'the two measurements must not be merged into 150 samples');
+  assert.equal(selected.startIndex, firstRun.length + 1);
+  assert.equal(selected.endIndex, rows.length - 1);
+  assert.ok(selected.rows.every(row => row.id.startsWith('second-')));
+});
+
+test('stable-section selection skips a drifting tail and extends the newest stable plateau', api => {
+  const vidCols = ['Core 0 VID [V]', 'Core 1 VID [V]'];
+  const groups = { CPU: [0, 1] };
+  const rows = [
+    ...makeVidWindow([40, -40], 10, 'warmup'),
+    ...makeVidWindow([-2, 2], 80, 'early'),
+    ...makeVidWindow([80, -80], 25, 'transition'),
+    ...makeVidWindow([-6, 6], 90, 'recent'),
+    ...makeVidWindow([-80, 80], 25, 'tail')
+  ];
+
+  const selected = api.selectStableAnalysisRows(rows, vidCols, groups);
+
+  assert.equal(selected.stableSelection, true);
+  assert.equal(selected.matchedRows, 230);
+  assert.equal(selected.warmupRows, 10);
+  assert.equal(selected.rows.length, 90, 'the 75-row seed must extend across the whole stable plateau');
+  assert.ok(selected.rows.every(row => row.id.startsWith('recent-')));
+  assert.equal(selected.rows[0].id, 'recent-0');
+  assert.equal(selected.rows.at(-1).id, 'recent-89');
+  assert.equal(selected.omittedEarlierRows, 105);
+  assert.equal(selected.omittedLaterRows, 25, 'the unstable tail must remain outside the selected block');
+  assert.equal(selected.windowStability.stationary, true);
+});
+
+test('stable-section selection preserves the prepared tail when no 75-row subsection is stationary', api => {
+  const vidCols = ['Core 0 VID [V]', 'Core 1 VID [V]'];
+  const groups = { CPU: [0, 1] };
+  const rows = Array.from({ length: 150 }, (_, index) => ({
+    id: `ramp-${index}`,
+    [vidCols[0]]: 1 + index * 0.0005,
+    [vidCols[1]]: 1 - index * 0.0005
+  }));
+
+  const selected = api.selectStableAnalysisRows(rows, vidCols, groups);
+
+  assert.equal(selected.stableSelection, false);
+  assert.equal(selected.matchedRows, 150);
+  assert.equal(selected.warmupRows, 10);
+  assert.equal(selected.rows.length, 140, 'failure must keep the normal prepared rows instead of inventing a good slice');
+  assert.equal(selected.rows[0].id, 'ramp-10');
+  assert.equal(selected.rows.at(-1).id, 'ramp-149');
+  assert.equal(selected.omittedEarlierRows, 0);
+  assert.equal(selected.omittedLaterRows, 0);
+  assert.equal(selected.windowStability.stationary, false);
+  assert.match(selected.windowStability.reason, /drift/i);
+});
+
+test('stable-section selection does not reach back past the recent 300-row analysis window', api => {
+  const vidCols = ['Core 0 VID [V]', 'Core 1 VID [V]'];
+  const groups = { CPU: [0, 1] };
+  const recentRamp = Array.from({ length: 310 }, (_, index) => ({
+    id: `recent-ramp-${index}`,
+    [vidCols[0]]: 1 + index * 0.0005,
+    [vidCols[1]]: 1 - index * 0.0005
+  }));
+  const rows = [
+    ...makeVidWindow([40, -40], 10, 'warmup'),
+    ...makeVidWindow([-2, 2], 90, 'stale-stable'),
+    ...recentRamp
+  ];
+
+  const selected = api.selectStableAnalysisRows(rows, vidCols, groups);
+
+  assert.equal(selected.stableSelection, false, 'an old plateau must not replace a nonstationary recent operating state');
+  assert.equal(selected.rows.length, 300);
+  assert.equal(selected.rows[0].id, 'recent-ramp-10');
+  assert.equal(selected.rows.at(-1).id, 'recent-ramp-309');
+  assert.equal(selected.omittedEarlierRows, 100);
+  assert.equal(selected.omittedLaterRows, 0);
+});
+
+test('stable-section selection uses recency rather than cherry-picking the smallest VID spread', async api => {
+  const vidCols = ['Core 0 VID [V]', 'Core 1 VID [V]'];
+  const groups = { CPU: [0, 1] };
+  const earlier = makeVidWindow([-1.5, 1.5], 90, 'narrow-earlier');
+  const later = makeVidWindow([-4, 4], 90, 'wide-later');
+  const rows = [
+    ...makeVidWindow([40, -40], 10, 'warmup'),
+    ...earlier,
+    ...makeVidWindow([80, -80], 25, 'transition'),
+    ...later
+  ];
+
+  const selected = api.selectStableAnalysisRows(rows, vidCols, groups);
+  const earlierMeans = await api.calculateVidMeansAsync(earlier, vidCols, 0);
+  const earlierBaselines = api.calculateReferenceBaselines(earlierMeans, groups).referenceBaselines;
+  const earlierStats = api.calculateVidStats(earlierMeans, earlierBaselines);
+  const selectedMeans = await api.calculateVidMeansAsync(selected.rows, vidCols, 0);
+  const selectedBaselines = api.calculateReferenceBaselines(selectedMeans, groups).referenceBaselines;
+  const selectedStats = api.calculateVidStats(selectedMeans, selectedBaselines);
+
+  assert.equal(selected.stableSelection, true);
+  assert.equal(selected.rows.length, 90);
+  assert.ok(selected.rows.every(row => row.id.startsWith('wide-later-')));
+  assertClose(earlierStats.range, 3, 1e-9, 'the earlier stationary block must be the prettier converged one');
+  assertClose(selectedStats.range, 8, 1e-9, 'the newer stationary block must win despite its wider spread');
+  assert.ok(selectedStats.range > earlierStats.range);
+  assert.equal(selected.windowStability.stationary, true);
+});
+
 test('severe clock stretching is suspect even below the preferred sample count', async api => {
   const headers = [
     'Core 0 Clock [MHz]',
@@ -201,6 +432,206 @@ test('severe clock stretching is suspect even below the preferred sample count',
   const result = await api.calculateClockStretchAsync(rows, headers, [0], 0);
   assert.equal(result.summaries[0].status, 'suspect');
   assert.equal(result.suspectCount, 1);
+});
+
+test('recommendation gate separates target, practical, and actionable spread zones', api => {
+  const stableConsensus = {
+    stationary: true,
+    windows: [{}, {}, {}],
+    agreedCores: [6],
+    maxCoreDrift: 0.2,
+    maxVectorRms: 0.2,
+    recommendations: { 6: -24 }
+  };
+  const noStretch = { suspectCount: 0 };
+
+  const converged = api.evaluateRecommendationGate(75, noStretch, 3.5, stableConsensus);
+  assert.equal(converged.actionable, false);
+  assert.equal(converged.state, 'converged');
+
+  const practical = api.evaluateRecommendationGate(75, noStretch, 4.07, stableConsensus);
+  assert.equal(practical.actionable, false);
+  assert.equal(practical.state, 'practical');
+  assert.match(practical.reason, /Keep the current offsets/);
+
+  const practicalBoundary = api.evaluateRecommendationGate(75, noStretch, 4.5, stableConsensus);
+  assert.equal(practicalBoundary.actionable, false);
+  assert.equal(practicalBoundary.state, 'practical');
+
+  const invalid = api.evaluateRecommendationGate(75, noStretch, NaN, stableConsensus);
+  assert.equal(invalid.actionable, false);
+  assert.equal(invalid.state, 'invalid');
+
+  const actionable = api.evaluateRecommendationGate(75, noStretch, 4.5001, stableConsensus);
+  assert.equal(actionable.actionable, true);
+  assert.equal(actionable.state, 'actionable');
+});
+
+test('recommendation gate requires 75 rows and stationary same-core direction agreement', api => {
+  const noStretch = { suspectCount: 0 };
+  const stableConsensus = {
+    stationary: true,
+    windows: [{}, {}, {}],
+    agreedCores: [6],
+    recommendations: { 6: -24 }
+  };
+
+  const short = api.evaluateRecommendationGate(74, noStretch, 5.2, stableConsensus);
+  assert.equal(short.actionable, false);
+  assert.match(short.reason, /75/);
+
+  const drifting = api.evaluateRecommendationGate(75, noStretch, 5.2, {
+    ...stableConsensus,
+    stationary: false,
+    agreedCores: []
+  });
+  assert.equal(drifting.actionable, false);
+  assert.match(drifting.reason, /remeasure|stationary|window/i);
+
+  const noDirectionAgreement = api.evaluateRecommendationGate(75, noStretch, 5.2, {
+    ...stableConsensus,
+    agreedCores: []
+  });
+  assert.equal(noDirectionAgreement.actionable, false);
+  assert.match(noDirectionAgreement.reason, /agree|direction|window/i);
+});
+
+test('stationary windows approve only the core and direction repeated in every window', async api => {
+  const residuals = [-0.320, -0.623, -0.737, 1.456, 0.285, 1.026, -3.026, 1.939];
+  const cores = residuals.map((_, core) => core);
+  const vidCols = cores.map(core => `Core ${core} VID [V]`);
+  const rows = [
+    ...makeVidWindow(residuals, 25, 'window-a'),
+    ...makeVidWindow(residuals.map((value, core) => value + (core % 2 ? 0.04 : -0.04)), 25, 'window-b'),
+    ...makeVidWindow(residuals.map((value, core) => value + (core % 2 ? -0.03 : 0.03)), 25, 'window-c')
+  ];
+  const current = { 0: -19, 1: -12, 2: -19, 3: -20, 4: -19, 5: -13, 6: -25, 7: -23 };
+  const overallRecommendations = { ...current, 6: -24 };
+
+  const consensus = await api.evaluateWindowConsensus(
+    rows,
+    vidCols,
+    { CPU: cores },
+    3.0,
+    current,
+    overallRecommendations
+  );
+
+  assert.equal(consensus.windows.length, 3);
+  assert.equal(consensus.stationary, true);
+  assert.deepEqual(plain(consensus.agreedCores), [6]);
+  assert.equal(consensus.recommendations[6], -24);
+});
+
+test('window consensus treats a practical-zone window as no directional vote', async api => {
+  const actionable = [-0.320, -0.623, -0.737, 1.456, 0.285, 1.026, -3.026, 1.939];
+  const practical = [...actionable];
+  practical[6] = -2.400;
+  const cores = actionable.map((_, core) => core);
+  const vidCols = cores.map(core => `Core ${core} VID [V]`);
+  const rows = [
+    ...makeVidWindow(actionable, 25, 'actionable-a'),
+    ...makeVidWindow(practical, 25, 'practical'),
+    ...makeVidWindow(actionable, 25, 'actionable-c')
+  ];
+  const current = { 0: -19, 1: -12, 2: -19, 3: -20, 4: -19, 5: -13, 6: -25, 7: -23 };
+  const consensus = await api.evaluateWindowConsensus(
+    rows,
+    vidCols,
+    { CPU: cores },
+    3.0,
+    current,
+    { ...current, 6: -24 }
+  );
+
+  assert.equal(consensus.stationary, true, 'the small range change must remain a stationary fixture');
+  assert.ok(consensus.windows[0].residualRange > 4.5);
+  assert.ok(consensus.windows[1].residualRange <= 4.5);
+  assert.ok(consensus.windows[2].residualRange > 4.5);
+  assert.deepEqual(plain(consensus.directionByCore[6]), [1, 0, 1]);
+  assert.deepEqual(plain(consensus.agreedCores), [], 'a practical-zone window must prevent three-window agreement');
+  assert.equal(consensus.recommendations[6], current[6]);
+});
+
+test('window consensus does not manufacture votes when all windows are in the practical zone', async api => {
+  const residuals = [-0.320, -0.623, -0.737, 1.456, 0.285, 1.026, -2.400, 1.939];
+  const cores = residuals.map((_, core) => core);
+  const vidCols = cores.map(core => `Core ${core} VID [V]`);
+  const rows = [
+    ...makeVidWindow(residuals, 25, 'practical-a'),
+    ...makeVidWindow(residuals, 25, 'practical-b'),
+    ...makeVidWindow(residuals, 25, 'practical-c')
+  ];
+  const current = { 0: -19, 1: -12, 2: -19, 3: -20, 4: -19, 5: -13, 6: -25, 7: -23 };
+  const consensus = await api.evaluateWindowConsensus(
+    rows,
+    vidCols,
+    { CPU: cores },
+    3.0,
+    current,
+    { ...current, 6: -24 }
+  );
+
+  assert.equal(consensus.stationary, true);
+  assert.ok(consensus.windows.every(window => window.residualRange <= 4.5));
+  assert.deepEqual(plain(consensus.directionByCore[6]), [0, 0, 0]);
+  assert.deepEqual(plain(consensus.agreedCores), []);
+  assert.deepEqual(plain(consensus.recommendations), current);
+});
+
+test('window consensus rejects a core whose correction reverses between stationary-sized windows', async api => {
+  const base = [-0.320, -0.623, -0.737, 1.456, 0.285, 1.026, -3.026, 1.939];
+  const reversed = [-0.320, -0.623, -0.737, 1.456, 0.285, 1.026, 3.100, -2.100];
+  const cores = base.map((_, core) => core);
+  const vidCols = cores.map(core => `Core ${core} VID [V]`);
+  const rows = [
+    ...makeVidWindow(base, 25, 'window-a'),
+    ...makeVidWindow(reversed, 25, 'window-b'),
+    ...makeVidWindow(base, 25, 'window-c')
+  ];
+  const current = { 0: -19, 1: -12, 2: -19, 3: -20, 4: -19, 5: -13, 6: -25, 7: -23 };
+  const overallRecommendations = { ...current, 6: -24 };
+
+  const consensus = await api.evaluateWindowConsensus(
+    rows,
+    vidCols,
+    { CPU: cores },
+    3.0,
+    current,
+    overallRecommendations
+  );
+
+  assert.equal(consensus.windows.length, 3);
+  assert.equal(consensus.stationary, false);
+  assert.ok(!plain(consensus.agreedCores).includes(6), 'C6 must not be approved when its measured direction reverses');
+  assert.equal(consensus.recommendations[6], current[6], 'a disputed correction must be suppressed');
+});
+
+test('window consensus rejects one drifting core even when aggregate window metrics pass', async api => {
+  const base = [-0.320, -0.623, -0.737, 1.456, 0.285, 1.026, -3.026, 1.939];
+  const shifted = base.map((value, core) => value + (core === 0 ? 1.2 : 0));
+  const cores = base.map((_, core) => core);
+  const vidCols = cores.map(core => `Core ${core} VID [V]`);
+  const rows = [
+    ...makeVidWindow(base, 25, 'stable-a'),
+    ...makeVidWindow(shifted, 25, 'drifted-b'),
+    ...makeVidWindow(shifted, 25, 'drifted-c')
+  ];
+  const current = { 0: -19, 1: -12, 2: -19, 3: -20, 4: -19, 5: -13, 6: -25, 7: -23 };
+  const consensus = await api.evaluateWindowConsensus(
+    rows,
+    vidCols,
+    { CPU: cores },
+    3.0,
+    current,
+    { ...current, 6: -24 }
+  );
+
+  assert.ok(consensus.maxCoreDrift > 1.0, 'the shifted core must exceed the per-core drift cap');
+  assert.ok(consensus.maxCoreStdDev <= 0.75, 'the fixture must pass the aggregate per-core SD cap');
+  assert.ok(consensus.maxVectorRms <= 0.75, 'the fixture must pass the aggregate vector RMS cap');
+  assert.equal(consensus.stationary, false);
+  assert.match(consensus.reason, /max core drift/i);
 });
 
 test('V1 harmonizer uses the arithmetic group mean', api => {
@@ -256,6 +687,34 @@ test('opposite residuals wider than one step change only one sufficient core', a
   assertClose(stats.range, 3.54, 1e-9);
   assert.equal(recommendations[0], -11, 'one higher-requesting core move is sufficient');
   assert.equal(recommendations[1], -10, 'the second borderline core must remain untouched');
+});
+
+test('fixed 3.5 mV optimizer target is independent of CO response and avoids a 3.0 mV cleanup move', api => {
+  const vidMeans = {
+    'Core 0 VID [V]': 0.9982,
+    'Core 1 VID [V]': 1.0018
+  };
+  const referenceBaselines = { 0: 1, 1: 1 };
+  const current = { 0: -10, 1: -10 };
+  const groups = { CPU: [0, 1] };
+
+  const fixedAtThreeMvResponse = api.calculateOffsets(
+    vidMeans, referenceBaselines, 3.0, current, 3.6, groups, 3.5
+  );
+  const fixedAtSixMvResponse = api.calculateOffsets(
+    vidMeans, referenceBaselines, 6.0, current, 3.6, groups, 3.5
+  );
+  const legacyThreeMvTarget = api.calculateOffsets(
+    vidMeans, referenceBaselines, 3.0, current, 3.6, groups, 3.0
+  );
+
+  assert.deepEqual(plain(fixedAtThreeMvResponse), current);
+  assert.deepEqual(plain(fixedAtSixMvResponse), current, 'changing response must not change the fixed convergence target');
+  assert.equal(
+    Object.keys(legacyThreeMvTarget).filter(core => legacyThreeMvTarget[core] !== current[core]).length,
+    1,
+    'the old 3.0 mV target would chase one extra core move'
+  );
 });
 
 test('the user example raises only C2 and leaves borderline C1 untouched', api => {

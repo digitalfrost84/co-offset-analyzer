@@ -678,6 +678,7 @@
                         <div>
                             <label for="mvStep">mV per CO step</label>
                             <input type="number" id="mvStep" value="3.0" step="0.1">
+                            <p class="field-note">Step response only; target ≤ 3.5 mV, practical ≤ 4.5 mV.</p>
                         </div>
                         <div>
                             <label for="analysisScope">Analysis scope</label>
@@ -764,7 +765,17 @@
         const AUTO_LOAD_MIN_PER_CORE_A = 2.5;
         const AUTO_LOAD_MIN_FLOOR_A = 20;
         const CLOCK_STRETCH_MIN_ROWS = 100;
-        const MIN_ACTIONABLE_ROWS = 30;
+        const MIN_ACTIONABLE_ROWS = 75;
+        const LOAD_RUN_MAX_GAP = 2;
+        const ANALYSIS_WARMUP_ROWS = 10;
+        const MAX_ANALYSIS_ROWS = 300;
+        const STATIONARITY_WINDOW_COUNT = 3;
+        const STATIONARY_MEDIAN_CORE_SD_MV = 0.50;
+        const STATIONARY_MAX_CORE_SD_MV = 0.75;
+        const STATIONARY_MAX_CORE_DRIFT_MV = 1.00;
+        const STATIONARY_MAX_VECTOR_RMS_MV = 0.75;
+        const CONVERGED_SPREAD_MV = 3.5;
+        const PRACTICAL_SPREAD_MV = 4.5;
         const CO_ACTION_HYSTERESIS_MV = 0.25;
 
         updateOffsetInputs();
@@ -774,6 +785,7 @@
         });
         document.getElementById('mvStep').addEventListener('input', refreshRecommendationsFromCurrentOffsets);
         document.getElementById('csvText').addEventListener('input', () => {
+            invalidateLatestAnalysis();
             uploadedCsvText = '';
             uploadedCsvName = '';
             activeAnalysisId++;
@@ -791,6 +803,11 @@
 
         function setStatus(text) {
             document.getElementById('status').textContent = text;
+        }
+
+        function invalidateLatestAnalysis() {
+            latestAnalysisResults = null;
+            latestRecommendations = null;
         }
 
         function getActiveCsvText() {
@@ -966,6 +983,7 @@
             document.querySelectorAll('#offsetInputs input').forEach(input => {
                 input.value = 0;
             });
+            refreshRecommendationsFromCurrentOffsets();
             setStatus('Offsets reset');
         }
 
@@ -976,6 +994,7 @@
                 const current = parseInt(input.value) || 0;
                 input.value = Math.max(min, Math.min(max, current + amount));
             });
+            refreshRecommendationsFromCurrentOffsets();
             setStatus(`${amount > 0 ? 'Increased' : 'Decreased'} all current offsets by 1`);
         }
 
@@ -1025,6 +1044,7 @@
             const applied = applyOffsetsToInputs(offsets);
 
             if (applied > 0) {
+                refreshRecommendationsFromCurrentOffsets();
                 setStatus(`Applied ${applied} current offsets`);
             } else {
                 setStatus('No offsets found to paste');
@@ -1053,6 +1073,7 @@
                 return input && (parseInt(input.value) || 0) !== offset;
             }).length;
             applyOffsetsToInputs(latestRecommendations);
+            refreshRecommendationsFromCurrentOffsets();
             setStatus(`Set ${changed} recommended offset${changed === 1 ? '' : 's'} as current`);
         }
 
@@ -1062,6 +1083,7 @@
             document.getElementById('fileName').textContent = '';
             uploadedCsvText = '';
             uploadedCsvName = '';
+            invalidateLatestAnalysis();
             activeAnalysisId++;
             clearTimeout(detectTimer);
             clearTimeout(autoAnalyzeTimer);
@@ -1069,6 +1091,9 @@
             detectedCoreCount = null;
             updateOffsetInputs();
             updateScopeLabel(null);
+            const results = document.getElementById('results');
+            results.className = 'empty-state';
+            results.innerHTML = '<div class="empty-state-inner"><div class="empty-icon">CO</div><h2>Ready</h2><p>Choose a HWiNFO log or paste CSV data to begin.</p></div>';
             setStatus('Waiting for CSV data');
         }
 
@@ -1081,6 +1106,7 @@
                 const reader = new FileReader();
                 clearTimeout(detectTimer);
                 clearTimeout(autoAnalyzeTimer);
+                invalidateLatestAnalysis();
                 uploadedCsvText = '';
                 uploadedCsvName = file.name;
                 textArea.value = '';
@@ -1694,24 +1720,23 @@
                     throw new Error('Could not find any Core VID columns');
                 }
 
-                const loadThreshold = await resolveLoadThresholdAsync(data.rows, data.headers, loadSensor, coreIndexes, selectedCoreCount, loadThresholdMode, manualMinCurrent, analysisId);
-                ensureAnalysisCurrent(analysisId);
-
-                const loadRows = await filterRowsByCurrentAsync(
+                const selectedRun = await selectAnalysisLoadRunAsync(
                     data.rows,
+                    data.headers,
                     loadSensor,
-                    loadThreshold.current,
-                    analysisId,
-                    loadThreshold.usageSensor,
-                    loadThreshold.usageThreshold
+                    vidCols,
+                    coreIndexes,
+                    selectedCoreCount,
+                    loadThresholdMode,
+                    manualMinCurrent,
+                    analysisId
                 );
                 ensureAnalysisCurrent(analysisId);
+                const loadThreshold = selectedRun.loadThreshold;
+                const groups = resolveAnalysisGroups(data.headers, coreIndexes);
+                const preparedRows = selectStableAnalysisRows(selectedRun.validRows, vidCols, groups);
+                const validRows = preparedRows.rows;
 
-                if (loadRows.length === 0) {
-                    throw new Error(`No rows found with load current >= ${formatAmps(loadThreshold.current)} using ${loadSensor.note}`);
-                }
-                const validRows = await filterRowsWithCompleteVidsAsync(loadRows, vidCols, analysisId);
-                ensureAnalysisCurrent(analysisId);
                 if (validRows.length === 0) {
                     throw new Error('Loaded rows did not contain complete, plausible simultaneous VID samples for every analyzed core.');
                 }
@@ -1730,18 +1755,20 @@
                 const correlation = await calculateAvgCorrelationAsync(validRows, vidCols, analysisId);
                 ensureAnalysisCurrent(analysisId);
 
-                const groups = resolveAnalysisGroups(data.headers, coreIndexes);
                 await paintProgress('Calculating offsets', 84, `${coreIndexes.length} cores`);
                 const { referenceBaselines, groupBaselines } = calculateReferenceBaselines(vidMeans, groups);
                 const vidStats = calculateVidStats(vidMeans, referenceBaselines);
                 const residualRange = calculateGroupedResidualRange(vidMeans, referenceBaselines, groups);
                 const clockStretch = await calculateClockStretchAsync(validRows, data.headers, coreIndexes, analysisId);
                 ensureAnalysisCurrent(analysisId);
-                const limitHeadroom = calculateLimitHeadroom(data.rows, validRows, data.headers);
+                const limitHeadroom = calculateLimitHeadroom(selectedRun.runRows, validRows, data.headers);
                 const railContext = calculateRailContext(validRows, data.headers, loadSensor);
-                const recommendationGate = evaluateRecommendationGate(validRows.length, clockStretch);
+                const proposedRecommendations = calculateOffsets(vidMeans, referenceBaselines, mvStep, currentOffsets, residualRange, groups, CONVERGED_SPREAD_MV);
+                const windowConsensus = evaluateWindowConsensus(validRows, vidCols, groups, mvStep, currentOffsets, proposedRecommendations);
+                const recommendationGate = evaluateRecommendationGate(validRows.length, clockStretch, residualRange, windowConsensus);
                 const recommendations = recommendationGate.actionable
-                    ? calculateOffsets(vidMeans, referenceBaselines, mvStep, currentOffsets, residualRange, groups) : preserveCurrentOffsets(vidMeans, currentOffsets);
+                    ? windowConsensus.recommendations
+                    : preserveCurrentOffsets(vidMeans, currentOffsets);
 
                 await paintProgress('Rendering results', 97, `${validRows.length.toLocaleString()} filtered rows`);
                 displayResultsV2(resultsDiv, {
@@ -1761,13 +1788,17 @@
                     groups,
                     currentOffsets,
                     recommendationGate,
+                    windowConsensus,
+                    analysisRows: validRows,
+                    vidCols,
+                    preparedRows,
                     recommendations,
                     clockStretch,
                     limitHeadroom,
                     loadSensor,
                     railContext
                 });
-                setProgress('Analysis complete', 100, `${validRows.length.toLocaleString()} filtered rows`);
+                setProgress('Analysis complete', 100, `${validRows.length.toLocaleString()} rows from one load run`);
                 setStatus(`Analysis complete · ${validRows.length.toLocaleString()} rows`);
             } catch (error) {
                 if (error.cancelled) return;
@@ -1778,6 +1809,217 @@
                     setAnalysisBusy(false);
                 }
             }
+        }
+
+        function findContiguousLoadRuns(rows, loadSensor, minCurrent, usageSensor = null, minUsage = null, maxGap = LOAD_RUN_MAX_GAP) {
+            const runs = [];
+            let startIndex = -1;
+            let lastMatchIndex = -1;
+            let matchedRows = 0;
+            let gap = 0;
+
+            const finishRun = () => {
+                if (startIndex < 0 || lastMatchIndex < startIndex || matchedRows === 0) return;
+                runs.push({
+                    rows: rows.slice(startIndex, lastMatchIndex + 1),
+                    startIndex,
+                    endIndex: lastMatchIndex,
+                    matchedRows
+                });
+                startIndex = -1;
+                lastMatchIndex = -1;
+                matchedRows = 0;
+                gap = 0;
+            };
+
+            rows.forEach((row, index) => {
+                const entries = Object.entries(row || {});
+                const repeatedHeaderMatches = entries.reduce((count, [column, value]) =>
+                    count + (String(value ?? '').trim() === String(column).trim() ? 1 : 0), 0);
+                const isRepeatedHeader = entries.length > 0
+                    && repeatedHeaderMatches >= Math.min(3, entries.length);
+                if (isRepeatedHeader) {
+                    finishRun();
+                    return;
+                }
+
+                const current = loadSensor ? loadSensor.read(row) : NaN;
+                const usage = usageSensor ? usageSensor.read(row) : NaN;
+                const currentMatches = !loadSensor || !Number.isFinite(minCurrent)
+                    || (Number.isFinite(current) && current >= minCurrent);
+                const usageMatches = !usageSensor || !Number.isFinite(minUsage)
+                    || (Number.isFinite(usage) && usage >= minUsage);
+                const matches = currentMatches && usageMatches;
+
+                if (matches) {
+                    if (startIndex < 0) startIndex = index;
+                    lastMatchIndex = index;
+                    matchedRows++;
+                    gap = 0;
+                } else if (startIndex >= 0) {
+                    gap++;
+                    if (gap > maxGap) finishRun();
+                }
+            });
+            finishRun();
+            return runs;
+        }
+
+        function selectContiguousLoadRun(rows, loadSensor, minCurrent, usageSensor = null, minUsage = null, minQualifiedRows = MIN_ACTIONABLE_ROWS, maxGap = LOAD_RUN_MAX_GAP) {
+            const runs = findContiguousLoadRuns(rows, loadSensor, minCurrent, usageSensor, minUsage, maxGap);
+            const qualifying = runs.filter(run => run.matchedRows >= minQualifiedRows);
+            const selected = qualifying.length > 0
+                ? qualifying[qualifying.length - 1]
+                : runs.reduce((best, run) => !best || run.matchedRows >= best.matchedRows ? run : best, null);
+
+            return selected
+                ? { ...selected, runCount: runs.length }
+                : { rows: [], startIndex: -1, endIndex: -1, matchedRows: 0, runCount: 0 };
+        }
+
+        async function selectAnalysisLoadRunAsync(rows, headers, loadSensor, vidCols, coreIndexes, selectedCoreCount, mode, manualMinCurrent, analysisId) {
+            const usageSensor = mode === 'auto' ? resolveLoadUsageSensor(headers, coreIndexes) : null;
+            let runs;
+
+            if (usageSensor) {
+                runs = findContiguousLoadRuns(rows, null, NaN, usageSensor, AUTO_LOAD_USAGE_MIN);
+            } else {
+                const preliminaryThreshold = await resolveLoadThresholdAsync(
+                    rows,
+                    headers,
+                    loadSensor,
+                    coreIndexes,
+                    selectedCoreCount,
+                    mode,
+                    manualMinCurrent,
+                    analysisId
+                );
+                runs = findContiguousLoadRuns(rows, loadSensor, preliminaryThreshold.current);
+            }
+
+            if (runs.length === 0) {
+                throw new Error(usageSensor
+                    ? `No contiguous CPU load run reached ${AUTO_LOAD_USAGE_MIN}% usage.`
+                    : 'No contiguous rows reached the selected load current.');
+            }
+
+            let best = null;
+            let lastError = null;
+            for (let index = runs.length - 1; index >= 0; index--) {
+                ensureAnalysisCurrent(analysisId);
+                const run = runs[index];
+                try {
+                    const loadThreshold = await resolveLoadThresholdAsync(
+                        run.rows,
+                        headers,
+                        loadSensor,
+                        coreIndexes,
+                        selectedCoreCount,
+                        mode,
+                        manualMinCurrent,
+                        analysisId
+                    );
+                    const loadRows = await filterRowsByCurrentAsync(
+                        run.rows,
+                        loadSensor,
+                        loadThreshold.current,
+                        analysisId,
+                        usageSensor || loadThreshold.usageSensor,
+                        usageSensor ? AUTO_LOAD_USAGE_MIN : loadThreshold.usageThreshold
+                    );
+                    const validRows = await filterRowsWithCompleteVidsAsync(loadRows, vidCols, analysisId);
+                    const candidate = {
+                        runRows: run.rows,
+                        validRows,
+                        loadThreshold: {
+                            ...loadThreshold,
+                            usageSensor: usageSensor || loadThreshold.usageSensor,
+                            usageThreshold: usageSensor ? AUTO_LOAD_USAGE_MIN : loadThreshold.usageThreshold,
+                            runSelection: {
+                                startIndex: run.startIndex,
+                                endIndex: run.endIndex,
+                                matchedRows: run.matchedRows,
+                                runCount: runs.length
+                            }
+                        }
+                    };
+
+                    if (validRows.length >= MIN_ACTIONABLE_ROWS) return candidate;
+                    if (!best || validRows.length > best.validRows.length) best = candidate;
+                } catch (error) {
+                    if (error.cancelled) throw error;
+                    lastError = error;
+                }
+            }
+
+            if (best) return best;
+            if (lastError) throw lastError;
+            throw new Error('No usable contiguous CPU load run was found.');
+        }
+
+        function prepareAnalysisRows(rows) {
+            const warmupRows = rows.length - ANALYSIS_WARMUP_ROWS >= MIN_ACTIONABLE_ROWS
+                ? ANALYSIS_WARMUP_ROWS
+                : 0;
+            const warmed = rows.slice(warmupRows);
+            const tailRows = Math.min(warmed.length, MAX_ANALYSIS_ROWS);
+            return {
+                rows: warmed.slice(warmed.length - tailRows),
+                matchedRows: rows.length,
+                warmupRows,
+                omittedEarlierRows: Math.max(0, warmed.length - tailRows),
+                omittedLaterRows: 0,
+                stableSelection: false,
+                windowStability: null
+            };
+        }
+
+        function selectStableAnalysisRows(rows, vidCols, groups) {
+            const prepared = prepareAnalysisRows(rows);
+            const warmupRows = prepared.warmupRows;
+            const warmed = rows.slice(warmupRows);
+            const searchBase = Math.max(0, warmed.length - MAX_ANALYSIS_ROWS);
+            const searchRows = warmed.slice(searchBase);
+
+            if (searchRows.length < MIN_ACTIONABLE_ROWS || vidCols.length === 0) {
+                return {
+                    ...prepared,
+                    windowStability: evaluateWindowStability(prepared.rows, vidCols, groups)
+                };
+            }
+
+            // Search newest to oldest. The selector considers only stationarity and
+            // recency, never VID spread or the offsets it would recommend.
+            for (let end = searchRows.length; end >= MIN_ACTIONABLE_ROWS; end--) {
+                let start = end - MIN_ACTIONABLE_ROWS;
+                let stability = evaluateWindowStability(searchRows.slice(start, end), vidCols, groups);
+                if (!stability.stationary) continue;
+
+                // Keep the newest endpoint fixed and extend the stable section
+                // backward, up to the normal analysis cap.
+                while (start > 0 && end - start < MAX_ANALYSIS_ROWS) {
+                    const nextStart = start - 1;
+                    const extended = evaluateWindowStability(searchRows.slice(nextStart, end), vidCols, groups);
+                    if (!extended.stationary) break;
+                    start = nextStart;
+                    stability = extended;
+                }
+
+                return {
+                    rows: searchRows.slice(start, end),
+                    matchedRows: rows.length,
+                    warmupRows,
+                    omittedEarlierRows: searchBase + start,
+                    omittedLaterRows: searchRows.length - end,
+                    stableSelection: true,
+                    windowStability: stability
+                };
+            }
+
+            return {
+                ...prepared,
+                windowStability: evaluateWindowStability(prepared.rows, vidCols, groups)
+            };
         }
 
         async function resolveLoadThresholdAsync(rows, headers, loadSensor, coreIndexes, selectedCoreCount, mode, manualMinCurrent, analysisId) {
@@ -2129,15 +2371,37 @@
             const { referenceBaselines, groupBaselines } = calculateReferenceBaselines(measuredVidMeans, latestAnalysisResults.groups);
             const vidStats = calculateVidStats(measuredVidMeans, referenceBaselines);
             const residualRange = calculateGroupedResidualRange(measuredVidMeans, referenceBaselines, latestAnalysisResults.groups);
-            const recommendations = latestAnalysisResults.recommendationGate?.actionable
-                ? calculateOffsets(
-                    measuredVidMeans,
-                    referenceBaselines,
+            const proposedRecommendations = calculateOffsets(
+                measuredVidMeans,
+                referenceBaselines,
+                mvStep,
+                currentOffsets,
+                residualRange,
+                latestAnalysisResults.groups,
+                CONVERGED_SPREAD_MV
+            );
+            const canRefreshConsensus = Array.isArray(latestAnalysisResults.analysisRows)
+                && Array.isArray(latestAnalysisResults.vidCols);
+            const windowConsensus = canRefreshConsensus
+                ? evaluateWindowConsensus(
+                    latestAnalysisResults.analysisRows,
+                    latestAnalysisResults.vidCols,
+                    latestAnalysisResults.groups,
                     mvStep,
                     currentOffsets,
-                    residualRange,
-                    latestAnalysisResults.groups
+                    proposedRecommendations
                 )
+                : latestAnalysisResults.windowConsensus;
+            const recommendationGate = canRefreshConsensus
+                ? evaluateRecommendationGate(
+                    latestAnalysisResults.analysisRows.length,
+                    latestAnalysisResults.clockStretch,
+                    residualRange,
+                    windowConsensus
+                )
+                : latestAnalysisResults.recommendationGate;
+            const recommendations = recommendationGate?.actionable
+                ? (windowConsensus?.recommendations || proposedRecommendations)
                 : preserveCurrentOffsets(measuredVidMeans, currentOffsets);
 
             displayResultsV2(document.getElementById('results'), {
@@ -2151,22 +2415,232 @@
                 maxDelta: vidStats.maxHighDelta,
                 residualRange,
                 currentOffsets,
+                recommendationGate,
+                windowConsensus,
                 recommendations
             });
             setStatus('Recommendations updated for current inputs');
         }
 
-        function evaluateRecommendationGate(validRowCount, clockStretch) {
-            if (validRowCount < MIN_ACTIONABLE_ROWS) {
-                return { actionable: false, reason: `Only ${validRowCount} complete load rows; at least ${MIN_ACTIONABLE_ROWS} are required.` };
-            }
-            if (clockStretch?.suspectCount > 0) {
-                return { actionable: false, reason: 'Possible clock stretching makes VID-only trial changes non-actionable.' };
-            }
-            return { actionable: true, reason: '' };
+        function calculateWindowVidMeans(rows, vidCols) {
+            const sums = Object.fromEntries(vidCols.map(column => [column, 0]));
+            const counts = Object.fromEntries(vidCols.map(column => [column, 0]));
+            rows.forEach(row => {
+                vidCols.forEach(column => {
+                    const value = parseNumber(row[column]);
+                    if (!Number.isFinite(value)) return;
+                    sums[column] += value;
+                    counts[column]++;
+                });
+            });
+            return Object.fromEntries(vidCols.map(column => [
+                column,
+                counts[column] > 0 ? sums[column] / counts[column] : NaN
+            ]));
         }
 
-        function calculateOffsets(vidMeans, referenceBaselines, mvStep, currentOffsets, residualRange, groups = null) {
+        function calculateResidualsByCore(vidMeans, referenceBaselines) {
+            return Object.fromEntries(Object.entries(vidMeans).map(([column, value]) => {
+                const core = getCoreIndexFromVidColumn(column);
+                const baseline = core === null ? NaN : referenceBaselines[core];
+                return [core, Number.isFinite(value) && Number.isFinite(baseline) ? (value - baseline) * 1000 : NaN];
+            }).filter(([core, value]) => core !== null && Number.isFinite(value)));
+        }
+
+        function populationStdDev(values) {
+            if (values.length === 0) return 0;
+            const average = mean(values);
+            return Math.sqrt(values.reduce((sum, value) => sum + Math.pow(value - average, 2), 0) / values.length);
+        }
+
+        function calculateResidualVectorRms(left, right) {
+            const cores = Object.keys(left).filter(core => Number.isFinite(left[core]) && Number.isFinite(right[core]));
+            if (cores.length === 0) return Infinity;
+            return Math.sqrt(cores.reduce((sum, core) => sum + Math.pow(right[core] - left[core], 2), 0) / cores.length);
+        }
+
+        function evaluateWindowStability(validRows, vidCols, groups) {
+            const coreIndexes = vidCols.map(getCoreIndexFromVidColumn).filter(core => core !== null);
+            if (validRows.length < MIN_ACTIONABLE_ROWS || vidCols.length === 0) {
+                return {
+                    stationary: false,
+                    windows: [],
+                    coreStdDevs: {},
+                    medianCoreStdDev: Infinity,
+                    maxCoreStdDev: Infinity,
+                    maxCoreDrift: Infinity,
+                    maxVectorRms: Infinity,
+                    reason: `At least ${MIN_ACTIONABLE_ROWS} matched rows are required for ${STATIONARITY_WINDOW_COUNT} comparison windows.`
+                };
+            }
+
+            const windows = [];
+            for (let index = 0; index < STATIONARITY_WINDOW_COUNT; index++) {
+                const start = Math.floor((index * validRows.length) / STATIONARITY_WINDOW_COUNT);
+                const end = Math.floor(((index + 1) * validRows.length) / STATIONARITY_WINDOW_COUNT);
+                const rows = validRows.slice(start, end);
+                const vidMeans = calculateWindowVidMeans(rows, vidCols);
+                const { referenceBaselines } = calculateReferenceBaselines(vidMeans, groups);
+                windows.push({
+                    start,
+                    end,
+                    rows: rows.length,
+                    vidMeans,
+                    referenceBaselines,
+                    residuals: calculateResidualsByCore(vidMeans, referenceBaselines),
+                    residualRange: calculateGroupedResidualRange(vidMeans, referenceBaselines, groups)
+                });
+            }
+
+            const coreStdDevs = {};
+            const coreDrifts = {};
+            coreIndexes.forEach(core => {
+                const values = windows.map(window => window.residuals[core]).filter(Number.isFinite);
+                coreStdDevs[core] = populationStdDev(values);
+                coreDrifts[core] = values.length > 0 ? Math.max(...values) - Math.min(...values) : Infinity;
+            });
+            const finiteCoreStdDevs = Object.values(coreStdDevs).filter(Number.isFinite).sort((a, b) => a - b);
+            const medianCoreStdDev = finiteCoreStdDevs.length > 0 ? median(finiteCoreStdDevs) : Infinity;
+            const maxCoreStdDev = finiteCoreStdDevs.length > 0 ? Math.max(...finiteCoreStdDevs) : Infinity;
+            const driftValues = Object.values(coreDrifts);
+            const maxCoreDrift = driftValues.length > 0 ? Math.max(...driftValues) : Infinity;
+            const adjacentVectorRms = windows.slice(1).map((window, index) =>
+                calculateResidualVectorRms(windows[index].residuals, window.residuals)
+            );
+            const maxVectorRms = adjacentVectorRms.length > 0 ? Math.max(...adjacentVectorRms) : Infinity;
+            const stationary = medianCoreStdDev <= STATIONARY_MEDIAN_CORE_SD_MV + 1e-9
+                && maxCoreStdDev <= STATIONARY_MAX_CORE_SD_MV + 1e-9
+                && maxCoreDrift <= STATIONARY_MAX_CORE_DRIFT_MV + 1e-9
+                && maxVectorRms <= STATIONARY_MAX_VECTOR_RMS_MV + 1e-9;
+            const reason = stationary
+                ? ''
+                : `Window drift is too high (median core SD ${medianCoreStdDev.toFixed(2)} mV, max core drift ${maxCoreDrift.toFixed(2)} mV, vector RMS ${maxVectorRms.toFixed(2)} mV).`;
+
+            return {
+                stationary,
+                windows,
+                coreStdDevs,
+                medianCoreStdDev,
+                maxCoreStdDev,
+                maxCoreDrift,
+                maxVectorRms,
+                reason
+            };
+        }
+
+        function evaluateWindowConsensus(validRows, vidCols, groups, mvStep, currentOffsets, overallRecommendations = null) {
+            const coreIndexes = vidCols.map(getCoreIndexFromVidColumn).filter(core => core !== null);
+            const current = Object.fromEntries(coreIndexes.map(core => [core, clampCoOffset(Number(currentOffsets[core]) || 0)]));
+            const unchanged = { ...current };
+            const stability = evaluateWindowStability(validRows, vidCols, groups);
+            if (stability.windows.length === 0) {
+                return {
+                    ...stability,
+                    agreedCores: [],
+                    directionByCore: {},
+                    recommendations: unchanged
+                };
+            }
+
+            const windows = stability.windows.map(window => ({
+                ...window,
+                recommendations: window.residualRange > PRACTICAL_SPREAD_MV + 1e-9
+                    ? calculateOffsets(window.vidMeans, window.referenceBaselines, mvStep, current, window.residualRange, groups, CONVERGED_SPREAD_MV)
+                    : { ...unchanged }
+            }));
+
+            let proposed = overallRecommendations;
+            if (!proposed) {
+                const vidMeans = calculateWindowVidMeans(validRows, vidCols);
+                const { referenceBaselines } = calculateReferenceBaselines(vidMeans, groups);
+                const residualRange = calculateGroupedResidualRange(vidMeans, referenceBaselines, groups);
+                proposed = calculateOffsets(vidMeans, referenceBaselines, mvStep, current, residualRange, groups, CONVERGED_SPREAD_MV);
+            }
+
+            const recommendations = { ...unchanged };
+            const agreedCores = [];
+            const directionByCore = {};
+            Object.entries(proposed).forEach(([coreKey, proposedValue]) => {
+                const core = Number(coreKey);
+                const overallDirection = Math.sign(proposedValue - current[core]);
+                if (overallDirection === 0) return;
+                const directions = windows.map(window => Math.sign((window.recommendations[core] ?? current[core]) - current[core]));
+                directionByCore[core] = directions;
+                if (stability.stationary && directions.every(direction => direction === overallDirection)) {
+                    recommendations[core] = proposedValue;
+                    agreedCores.push(core);
+                }
+            });
+
+            let reason = stability.reason;
+            if (stability.stationary && agreedCores.length === 0) {
+                reason = 'The three stationary windows do not agree on the same core and direction.';
+            }
+
+            return {
+                ...stability,
+                windows,
+                agreedCores,
+                directionByCore,
+                recommendations,
+                reason
+            };
+        }
+
+        function evaluateRecommendationGate(validRowCount, clockStretch, residualRange, windowConsensus) {
+            if (validRowCount < MIN_ACTIONABLE_ROWS) {
+                return {
+                    state: 'insufficient',
+                    actionable: false,
+                    reason: `Only ${validRowCount} complete load rows; at least ${MIN_ACTIONABLE_ROWS} are required.`
+                };
+            }
+            if (clockStretch?.suspectCount > 0) {
+                return {
+                    state: 'clock-stretch',
+                    actionable: false,
+                    reason: 'Possible clock stretching makes VID-only trial changes non-actionable.'
+                };
+            }
+            if (!Number.isFinite(residualRange)) {
+                return { state: 'invalid', actionable: false, reason: 'The loaded run did not produce a valid VID spread.' };
+            }
+            if (residualRange <= CONVERGED_SPREAD_MV + 1e-9) {
+                return {
+                    state: 'converged',
+                    actionable: false,
+                    reason: `Highest-to-lowest VID spread is ${residualRange.toFixed(2)} mV, within the ${CONVERGED_SPREAD_MV.toFixed(1)} mV convergence zone.`
+                };
+            }
+            if (residualRange <= PRACTICAL_SPREAD_MV + 1e-9) {
+                return {
+                    state: 'practical',
+                    actionable: false,
+                    reason: `VID spread is ${residualRange.toFixed(2)} mV, within the ${PRACTICAL_SPREAD_MV.toFixed(1)} mV practical convergence limit. Keep the current offsets.`
+                };
+            }
+            if (!windowConsensus?.stationary) {
+                return {
+                    state: 'unstable',
+                    actionable: false,
+                    reason: windowConsensus?.reason || 'The three load windows are not stationary enough to justify another offset change.'
+                };
+            }
+            if (!windowConsensus.agreedCores?.length) {
+                return {
+                    state: 'disagreement',
+                    actionable: false,
+                    reason: windowConsensus.reason || 'The three load windows do not agree on the same core and direction.'
+                };
+            }
+            return {
+                state: 'actionable',
+                actionable: true,
+                reason: `Three stationary windows agree on ${windowConsensus.agreedCores.map(core => `C${core}`).join(', ')}.`
+            };
+        }
+
+        function calculateOffsets(vidMeans, referenceBaselines, mvStep, currentOffsets, residualRange, groups = null, targetRange = mvStep) {
             const items = Object.entries(vidMeans).map(([column, vid]) => {
                 const core = getCoreIndexFromVidColumn(column);
                 if (core === null || !Number.isFinite(referenceBaselines[core])) return null;
@@ -2180,15 +2654,16 @@
             }).filter(Boolean).sort((a, b) => a.core - b.core);
             const recommendations = Object.fromEntries(items.map(item => [item.core, item.current]));
             const actionHysteresis = calculateActionHysteresis(mvStep);
-            if (Number.isFinite(residualRange) && residualRange <= mvStep + actionHysteresis + 1e-9) {
+            const resolvedTargetRange = Number.isFinite(targetRange) && targetRange > 0 ? targetRange : mvStep;
+            if (Number.isFinite(residualRange) && residualRange <= resolvedTargetRange + actionHysteresis + 1e-9) {
                 return recommendations;
             }
 
             resolveRecommendationGroups(items, groups).forEach(groupItems => {
                 const originalRange = calculateResidualRange(groupItems.map(item => item.residual));
-                if (originalRange <= mvStep + actionHysteresis + 1e-9) return;
+                if (originalRange <= resolvedTargetRange + actionHysteresis + 1e-9) return;
 
-                const choice = findMinimalHarmonization(groupItems, mvStep, originalRange);
+                const choice = findMinimalHarmonization(groupItems, mvStep, originalRange, resolvedTargetRange);
                 if (!choice) return;
                 choice.forEach(option => {
                     recommendations[option.core] = option.offset;
@@ -2239,7 +2714,7 @@
             return resolved;
         }
 
-        function findMinimalHarmonization(items, mvStep, originalRange) {
+        function findMinimalHarmonization(items, mvStep, originalRange, targetRange = mvStep) {
             const actionHysteresis = calculateActionHysteresis(mvStep);
             const actionThreshold = mvStep * 0.5 + actionHysteresis;
             const optionSets = items.map(item => {
@@ -2262,12 +2737,12 @@
                 return { item, options };
             });
 
-            const exact = findExactHarmonization(optionSets, mvStep, originalRange, actionHysteresis);
+            const exact = findExactHarmonization(optionSets, targetRange, originalRange, actionHysteresis);
             if (exact) return exact.selected;
 
             if (hasBlockedResidualExtreme(items)) {
                 const expandedOptionSets = buildExpandedOptionSets(items, mvStep);
-                const rebasedExact = findExactHarmonization(expandedOptionSets, mvStep, originalRange, actionHysteresis);
+                const rebasedExact = findExactHarmonization(expandedOptionSets, targetRange, originalRange, actionHysteresis);
                 if (rebasedExact) return rebasedExact.selected;
                 const rebasedFallback = findTightestHarmonization(expandedOptionSets, originalRange, actionHysteresis);
                 return rebasedFallback ? rebasedFallback.selected : null;
@@ -2277,15 +2752,15 @@
             return fallback ? fallback.selected : null;
         }
 
-        function findExactHarmonization(optionSets, mvStep, originalRange, actionHysteresis) {
+        function findExactHarmonization(optionSets, targetRange, originalRange, actionHysteresis) {
 
             const boundaryValues = [...new Set(optionSets.flatMap(({ options }) =>
-                options.flatMap(option => [option.residual, option.residual - mvStep])
+                options.flatMap(option => [option.residual, option.residual - targetRange])
             ))].sort((a, b) => a - b);
             let best = null;
 
             boundaryValues.forEach(lower => {
-                const upper = lower + mvStep;
+                const upper = lower + targetRange;
                 const selected = [];
                 for (const { options } of optionSets) {
                     const fitting = options.filter(option => option.residual >= lower - 1e-9 && option.residual <= upper + 1e-9);
@@ -2295,7 +2770,7 @@
                 }
 
                 const candidate = scoreHarmonization(selected, originalRange);
-                if (candidate.range > mvStep + 1e-9 || candidate.improvement < actionHysteresis - 1e-9) return;
+                if (candidate.range > targetRange + 1e-9 || candidate.improvement < actionHysteresis - 1e-9) return;
                 if (!best || compareHarmonizationScores(candidate, best) < 0) best = candidate;
             });
 
@@ -3057,6 +3532,12 @@
             const largestChange = getLargestRecommendationChange(results.recommendations, results.currentOffsets);
 
             if (!results.recommendationGate?.actionable) {
+                if (['converged', 'practical'].includes(results.recommendationGate?.state)) {
+                    return {
+                        kind: 'success',
+                        text: results.recommendationGate.reason
+                    };
+                }
                 return {
                     kind: rowStatus === 'bad' ? 'error' : 'warn',
                     text: `No trial changes are actionable from this log. ${results.recommendationGate?.reason || 'Collect a cleaner matched-load log.'}`
@@ -3101,6 +3582,18 @@
 
         function calculateV2Decision(results, changedRecommendations) {
             if (!results.recommendationGate?.actionable) {
+                if (['converged', 'practical'].includes(results.recommendationGate?.state)) {
+                    return {
+                        title: 'No changes recommended',
+                        subtitle: results.recommendationGate.reason
+                    };
+                }
+                if (['unstable', 'disagreement'].includes(results.recommendationGate?.state)) {
+                    return {
+                        title: 'Hold and remeasure',
+                        subtitle: results.recommendationGate.reason
+                    };
+                }
                 return {
                     title: 'No trial generated',
                     subtitle: results.recommendationGate?.reason || 'This log does not meet the analysis gate.'
@@ -3108,11 +3601,11 @@
             }
 
             if (changedRecommendations.length === 0) {
-                const withinTarget = !Number.isFinite(results.residualRange) || results.residualRange <= results.mvStep + 1e-9;
+                const withinTarget = !Number.isFinite(results.residualRange) || results.residualRange <= CONVERGED_SPREAD_MV + 1e-9;
                 return {
                     title: 'No changes recommended',
                     subtitle: withinTarget
-                        ? `Every analyzed core group is within ${results.mvStep.toFixed(1)} mV.`
+                        ? `Highest-to-lowest VID spread is within ${CONVERGED_SPREAD_MV.toFixed(1)} mV.`
                         : 'Every core group is close enough to target that another change would risk over-correction.'
                 };
             }
@@ -3139,43 +3632,83 @@
             if (residuals.length === 0) return '';
 
             const values = residuals.map(item => item.delta);
-            let axisMin = Math.floor(Math.min(...values, -results.mvStep * 2) - 0.5);
-            let axisMax = Math.ceil(Math.max(...values, results.mvStep + 1) + 0.5);
+            const convergedHalf = CONVERGED_SPREAD_MV / 2;
+            const practicalHalf = PRACTICAL_SPREAD_MV / 2;
+            let axisMin = Math.floor(Math.min(...values, -practicalHalf - 0.5) - 0.5);
+            let axisMax = Math.ceil(Math.max(...values, practicalHalf + 0.5) + 0.5);
             if (axisMax - axisMin < 6) axisMax = axisMin + 6;
             const span = axisMax - axisMin;
             const position = value => Math.max(0, Math.min(100, ((value - axisMin) / span) * 100));
             const zero = position(0);
-            const halfStep = results.mvStep / 2;
-            const lowerThreshold = position(-halfStep);
-            const upperThreshold = position(halfStep);
+            const lowerThreshold = position(-convergedHalf);
+            const upperThreshold = position(convergedHalf);
+            const practicalLower = position(-practicalHalf);
+            const practicalUpper = position(practicalHalf);
+            const residualGroups = new Map();
+            residuals.forEach(item => {
+                if (!residualGroups.has(item.group)) residualGroups.set(item.group, []);
+                residualGroups.get(item.group).push(item.delta);
+            });
+            const groupSpreads = [...residualGroups.entries()]
+                .map(([group, groupValues]) => ({
+                    group,
+                    minimum: Math.min(...groupValues),
+                    maximum: Math.max(...groupValues),
+                    range: calculateResidualRange(groupValues)
+                }));
+            const widestGroup = [...groupSpreads].sort((a, b) => b.range - a.range)[0];
+            const spreadLeft = position(widestGroup.minimum);
+            const spreadWidth = Math.max(0, position(widestGroup.maximum) - spreadLeft);
+            const spreadState = widestGroup.range <= CONVERGED_SPREAD_MV + 1e-9
+                ? 'converged'
+                : widestGroup.range <= PRACTICAL_SPREAD_MV + 1e-9
+                    ? 'practical'
+                    : 'actionable';
+            const spreadLabel = residualGroups.size > 1
+                ? `${widestGroup.group} field spread`
+                : 'Field spread';
 
             let html = '<section class="residual-section">';
             html += '<h2 class="result-label">Core VID residuals</h2>';
             html += '<div class="residual-table">';
             residuals.forEach(item => {
                 const groupSuffix = Object.keys(results.groups).length > 1 ? ` · ${escapeHTML(item.group)}` : '';
+                const current = results.currentOffsets[item.core] || 0;
+                const proposed = results.recommendations[item.core];
+                const isRecommendedChange = results.recommendationGate?.actionable
+                    && Number.isFinite(proposed)
+                    && proposed !== current;
                 html += `
                     <div class="residual-row">
                         <div class="residual-core">C${item.core}${groupSuffix}</div>
                         <div class="residual-value">${formatV2Signed(item.delta)} mV</div>
-                        <div class="residual-track" style="--zero:${zero}%;--position:${position(item.delta)}%">
+                        <div class="residual-track" style="--zero:${zero}%;--position:${position(item.delta)}%;--practical-lower:${practicalLower}%;--practical-upper:${practicalUpper}%;--converged-lower:${lowerThreshold}%;--converged-upper:${upperThreshold}%">
+                            <span class="residual-band practical" aria-hidden="true"></span>
+                            <span class="residual-band converged" aria-hidden="true"></span>
                             <span class="residual-guide lower" style="left:${lowerThreshold}%" aria-hidden="true"></span>
                             <span class="residual-guide upper" style="left:${upperThreshold}%" aria-hidden="true"></span>
-                            <span class="residual-dot ${item.delta >= results.mvStep ? 'high' : ''}" aria-hidden="true"></span>
+                            <span class="residual-dot ${isRecommendedChange ? 'high' : ''}" aria-hidden="true"></span>
                         </div>
                     </div>`;
             });
             html += `
+                <div class="residual-spread-row">
+                    <span class="residual-spread-label">${escapeHTML(spreadLabel)} ${widestGroup.range.toFixed(2)} mV · ${spreadState}</span>
+                    <div class="residual-spread-track" style="--spread-left:${spreadLeft}%;--spread-width:${spreadWidth}%">
+                        <span class="residual-spread-range" aria-hidden="true"></span>
+                    </div>
+                </div>
                 <div class="residual-axis">
                     <span></span><span></span>
                     <div class="axis-track">
                         <span class="axis-mark" style="left:0%">${formatV2Axis(axisMin)}</span>
-                        <span class="axis-mark threshold lower" style="left:${lowerThreshold}%">${formatV2Signed(-halfStep, 1)} mV</span>
+                        <span class="axis-mark threshold lower" style="left:${lowerThreshold}%">${formatV2Signed(-convergedHalf, 2)} mV</span>
                         <span class="axis-mark" style="left:${zero}%">0</span>
-                        <span class="axis-mark threshold upper" style="left:${upperThreshold}%">${formatV2Signed(halfStep, 1)} mV</span>
+                        <span class="axis-mark threshold upper" style="left:${upperThreshold}%">${formatV2Signed(convergedHalf, 2)} mV</span>
                         <span class="axis-mark" style="left:100%">${formatV2Axis(axisMax)}</span>
                     </div>
-                </div>`;
+                </div>
+                <div class="residual-zone-note">Centered guides: ±${convergedHalf.toFixed(2)} mV target · ±${practicalHalf.toFixed(2)} mV practical limit. Decision uses field spread.</div>`;
             html += '</div></section>';
             return html;
         }
@@ -3227,6 +3760,20 @@
         function buildV2Details(results) {
             const groupCount = Object.keys(results.groups).length;
             const scope = groupCount > 1 ? `${groupCount} CCD groups` : 'Whole CPU';
+            const runSelection = results.loadThreshold?.runSelection;
+            const preparedRows = results.preparedRows;
+            const stableTail = preparedRows?.stableSelection && preparedRows.omittedLaterRows > 0
+                ? `; ${preparedRows.omittedLaterRows.toLocaleString()} newer rows excluded by the stability check`
+                : '';
+            const selectionKind = preparedRows?.stableSelection ? 'stable rows selected' : 'recent rows analyzed';
+            const selectedRun = runSelection
+                ? `${runSelection.matchedRows.toLocaleString()} loaded rows; ${results.validRows.toLocaleString()} ${selectionKind}${stableTail}`
+                : `${results.validRows.toLocaleString()} ${selectionKind}${stableTail}`;
+            const windowStability = results.windowConsensus?.windows?.length
+                ? results.windowConsensus.stationary
+                    ? `Stable · max core drift ${results.windowConsensus.maxCoreDrift.toFixed(2)} mV · window RMS ${results.windowConsensus.maxVectorRms.toFixed(2)} mV`
+                    : `Unstable · max core drift ${results.windowConsensus.maxCoreDrift.toFixed(2)} mV · window RMS ${results.windowConsensus.maxVectorRms.toFixed(2)} mV`
+                : 'Not enough rows for three windows';
             let clockTable = '';
             if (results.clockStretch?.available) {
                 clockTable = `
@@ -3245,6 +3792,9 @@
                     <div class="detail-grid">
                         <span>Scope</span><strong>${scope}</strong>
                         <span>Load filter</span><strong>${formatLoadThresholdMetric(results.loadThreshold)}</strong>
+                        <span>Selected load run</span><strong>${selectedRun}</strong>
+                        <span>Window stability</span><strong>${windowStability}</strong>
+                        <span>Decision zones</span><strong>Target ≤ ${CONVERGED_SPREAD_MV.toFixed(1)} mV · practical convergence ≤ ${PRACTICAL_SPREAD_MV.toFixed(1)} mV</strong>
                         <span>VID co-movement</span><strong>${results.correlation.toFixed(3)}</strong>
                         <span>Clock gap</span><strong>${formatClockStretchMetric(results.clockStretch)}</strong>
                     </div>
@@ -3268,7 +3818,6 @@
                     ? results.recommendations[core]
                     : (results.currentOffsets[core] || 0)
             ]));
-            latestRecommendations = results.recommendationGate?.actionable ? { ...completeRecommendations } : null;
             const sortedRecommendations = Object.entries(completeRecommendations);
             const changedRecommendations = sortedRecommendations.filter(([core, value]) => {
                 const current = results.currentOffsets[core] || 0;
@@ -3276,6 +3825,9 @@
             });
             const decision = calculateV2Decision(results, changedRecommendations);
             const copyText = buildCopyText(completeRecommendations, results.groups);
+            const showCurrentValues = ['converged', 'practical', 'unstable', 'disagreement'].includes(results.recommendationGate?.state);
+            const showOffsetValues = results.recommendationGate?.actionable || showCurrentValues;
+            latestRecommendations = showOffsetValues ? { ...completeRecommendations } : null;
             const notes = [];
             if (results.loadSensor?.kind === 'estimatedCurrent') notes.push('Load source: SVI3 power ÷ voltage');
             if (results.loadSensor?.kind === 'tdc') notes.push('Load source: CPU TDC');
@@ -3285,8 +3837,10 @@
                 ? changedRecommendations.length > 0
                     ? '<button type="button" class="primary-btn" onclick="copyRecommendations()">Copy offsets</button><button type="button" class="ghost-btn" onclick="useRecommendationsAsCurrent()">I applied them</button>'
                     : '<button type="button" class="ghost-btn" onclick="copyRecommendations()">Copy current values</button>'
-                : '';
-            const trialList = results.recommendationGate?.actionable && sortedRecommendations.length > 0
+                : showCurrentValues
+                    ? '<button type="button" class="ghost-btn" onclick="copyRecommendations()">Copy current values</button>'
+                    : '';
+            const trialList = showOffsetValues && sortedRecommendations.length > 0
                 ? `<div class="trial-list-v2">${sortedRecommendations.map(([core, value]) => {
                     const current = results.currentOffsets[core] || 0;
                     const steps = Math.abs(value - current);
@@ -3319,7 +3873,7 @@
                         </div>
                         <div class="button-row">${actionButtons}</div>
                     </div>
-                    <pre id="copyText" class="copy-box">${escapeHTML(copyText)}</pre>
+                    <pre id="copyText" class="copy-box" aria-hidden="true">${escapeHTML(copyText)}</pre>
                     ${buildV2Details(results)}
                 </div>`;
         }

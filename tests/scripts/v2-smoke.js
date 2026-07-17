@@ -118,11 +118,12 @@ function loadV1Harmonizer() {
 }
 
 function baseResults() {
-  const means = [1.10005, 1.09404, 1.09995, 1.10263, 1.10080, 1.09787, 1.09874, 1.10160];
+  const residuals = [-1.17, 0.63, 1.36, -0.09, -0.60, -0.33, -0.49, 0.69];
+  const means = residuals.map(residual => 1.1 + residual / 1000);
   const cores = Array.from({ length: 8 }, (_, core) => core);
   return {
-    totalRows: 50,
-    validRows: 50,
+    totalRows: 100,
+    validRows: 75,
     minCurrent: 78.4,
     loadThreshold: {
       mode: 'auto',
@@ -131,9 +132,9 @@ function baseResults() {
       usageThreshold: 80,
       maxCurrent: 89.4
     },
-    stdDev: 2.5,
-    maxDelta: 2.63,
-    residualRange: 2.95,
+    stdDev: 0.81,
+    maxDelta: 1.36,
+    residualRange: 2.53,
     correlation: 0.95,
     mvStep: 3.0,
     vidMeans: Object.fromEntries(cores.map(core => [`Core ${core} VID [V]`, means[core]])),
@@ -142,7 +143,11 @@ function baseResults() {
     groups: { CPU: cores },
     currentOffsets: Object.fromEntries(cores.map(core => [core, 0])),
     recommendations: Object.fromEntries(cores.map(core => [core, 0])),
-    recommendationGate: { actionable: true, reason: '' },
+    recommendationGate: {
+      state: 'converged',
+      actionable: false,
+      reason: 'Highest-to-lowest VID spread is 2.53 mV, within the 3.5 mV convergence zone.'
+    },
     clockStretch: { available: false, summaries: {}, suspectCount: 0, watchCount: 0, worstP95: 0 },
     limitHeadroom: {
       available: true,
@@ -199,7 +204,7 @@ function main() {
   assert.match(html, /getElementById\('mvStep'\)\.addEventListener\('input', refreshRecommendationsFromCurrentOffsets\)/);
   assert.match(html, /function refreshRecommendationsFromCurrentOffsets\(\)/);
   assert.match(html, /const groupBaseline = values\.reduce\(\(sum, value\) => sum \+ value, 0\) \/ values\.length/);
-  assert.match(html, /function calculateOffsets\(vidMeans, referenceBaselines, mvStep, currentOffsets, residualRange, groups = null\)/);
+  assert.match(html, /function calculateOffsets\(vidMeans, referenceBaselines, mvStep, currentOffsets, residualRange, groups = null, targetRange = mvStep\)/);
   assert.match(html, /if \(magnitude <= actionThreshold \+ 1e-9\) return 0/);
   assert.match(html, /CO offsets used for this log/);
   assert.match(html, /Enter the values that were active while this CSV was recorded\./);
@@ -231,18 +236,50 @@ function main() {
   assert.match(noChange, /Current offsets unchanged/);
   assert.match(noChange, /Keep C0 at 0<\/strong><small>unchanged · zero anchor/);
   assert.match(noChange, /Keep C7 at 0<\/strong><small>unchanged · zero anchor/);
-  assert.match(noChange, /id="copyText"/);
+  assert.match(noChange, /id="copyText" class="copy-box" aria-hidden="true"/);
   assert.doesNotMatch(noChange, /residual-dot high/);
+  assert.equal((noChange.match(/class="residual-band practical"/g) || []).length, 8, 'each core row must render the practical convergence band');
+  assert.equal((noChange.match(/class="residual-band converged"/g) || []).length, 8, 'each core row must render the convergence band');
+  assert.match(noChange, /Field spread 2\.53 mV · converged/);
+  assert.match(noChange, /Centered guides: ±1\.75 mV target · ±2\.25 mV practical limit\. Decision uses field spread\./);
   assert.equal((noChange.match(/class="residual-guide lower"/g) || []).length, 8, 'each core row must render the lower half-step guide');
   assert.equal((noChange.match(/class="residual-guide upper"/g) || []).length, 8, 'each core row must render the upper half-step guide');
-  assert.match(noChange, /−1\.5 mV/, 'the lower guide must be half a CO step below zero');
-  assert.match(noChange, /\+1\.5 mV/, 'the upper guide must be half a CO step above zero');
+  assert.match(noChange, /−1\.75 mV/, 'the lower guide must mark half of the 3.5 mV convergence zone');
+  assert.match(noChange, /\+1\.75 mV/, 'the upper guide must mark half of the 3.5 mV convergence zone');
   assert.doesNotMatch(noChange, /rail context|LLC|experimental/i);
+
+  const practicalResults = baseResults();
+  practicalResults.vidMeans['Core 0 VID [V]'] = 1.0979;
+  practicalResults.vidMeans['Core 2 VID [V]'] = 1.1021;
+  practicalResults.residualRange = 4.2;
+  practicalResults.recommendationGate = {
+    state: 'practical',
+    actionable: false,
+    reason: 'VID spread is 4.20 mV, within the 4.5 mV practical convergence limit. Keep the current offsets.'
+  };
+  const practical = render(api, practicalResults);
+  assert.match(practical, /No changes recommended/);
+  assert.doesNotMatch(practical, /Hold and remeasure/);
+  assert.match(practical, /Field spread 4\.20 mV · practical/);
+  assert.match(practical, /Copy current values/);
+  assert.doesNotMatch(practical, /residual-dot high/, 'practical-convergence dots must not look like recommended changes');
+
+  const unstableResults = baseResults();
+  unstableResults.residualRange = 5.2;
+  unstableResults.recommendationGate = {
+    state: 'unstable',
+    actionable: false,
+    reason: 'Window drift is too high.'
+  };
+  const unstable = render(api, unstableResults);
+  assert.match(unstable, /Hold and remeasure/);
+  assert.match(unstable, /Window drift is too high\./);
 
   const changedResults = baseResults();
   changedResults.maxDelta = 4.5;
   changedResults.vidMeans['Core 3 VID [V]'] = 1.1045;
   changedResults.recommendations[3] = -1;
+  changedResults.recommendationGate = { state: 'actionable', actionable: true, reason: 'Three stationary windows agree on C3.' };
   const changed = render(api, changedResults);
   assert.match(changed, /1 offset to apply/);
   assert.match(changed, /Set C3 to -1<\/strong><small>from 0 · 1 step more negative/);
@@ -270,32 +307,33 @@ function main() {
   api.displayResultsV2(liveResults, changedResults);
   offsetInputs.queryResults[3].value = '-30';
   api.refreshRecommendationsFromCurrentOffsets();
-  assert.match(liveResults.innerHTML, /\+4\.81 mV/, 'editing offsets must retain the residuals measured in the loaded log');
+  assert.match(liveResults.innerHTML, /\+3\.93 mV/, 'editing offsets must retain the residuals measured in the loaded log');
   assert.match(liveResults.innerHTML, /Keep C1 at 0<\/strong><small>unchanged · zero anchor/, 'a low residual pinned at CO zero must remain the rebase anchor');
-  assert.match(liveResults.innerHTML, /Set C3 to -33<\/strong><small>from -30 · 3 steps more negative/, 'the bounded field must rebase C3 toward the pinned low anchor');
-  assert.match(liveResults.innerHTML, /Set C7 to -2<\/strong><small>from 0 · 2 steps more negative/, 'the bounded field must rebase the other movable cores needed to close the interval');
+  assert.match(liveResults.innerHTML, /Set C3 to -31<\/strong><small>from -30 · 1 step more negative/, 'the bounded field must make the smallest change that closes the interval');
+  assert.match(liveResults.innerHTML, /Keep C7 at 0<\/strong><small>unchanged · zero anchor/, 'a core already inside the resulting field must remain unchanged');
 
   const beforeMvStepChange = liveResults.innerHTML;
   const beforeLowerGuide = beforeMvStepChange.match(/class="residual-guide lower" style="left:([0-9.]+)%"/);
   const beforeUpperGuide = beforeMvStepChange.match(/class="residual-guide upper" style="left:([0-9.]+)%"/);
   assert.ok(beforeLowerGuide && beforeUpperGuide, 'both plot guides must expose their rendered positions');
-  api.document.getElementById('mvStep').value = '6.0';
+  api.document.getElementById('mvStep').value = '1.0';
   api.refreshRecommendationsFromCurrentOffsets();
   assert.notEqual(liveResults.innerHTML, beforeMvStepChange, 'changing mV per CO step must recompute the rendered result');
+  assert.match(liveResults.innerHTML, /Set C3 to -33<\/strong><small>from -30 · 3 steps more negative/, 'a smaller response estimate must require more CO steps');
   const afterLowerGuide = liveResults.innerHTML.match(/class="residual-guide lower" style="left:([0-9.]+)%"/);
   const afterUpperGuide = liveResults.innerHTML.match(/class="residual-guide upper" style="left:([0-9.]+)%"/);
   assert.ok(afterLowerGuide && afterUpperGuide, 'both recomputed plot guides must expose their rendered positions');
-  assert.notEqual(afterLowerGuide[1], beforeLowerGuide[1], 'the lower plot guide must move when mV per CO step changes');
-  assert.notEqual(afterUpperGuide[1], beforeUpperGuide[1], 'the upper plot guide must move when mV per CO step changes');
-  assert.match(liveResults.innerHTML, /−3\.0 mV/, 'the lower plot guide must move to half the edited mV per CO step value');
-  assert.match(liveResults.innerHTML, /\+3\.0 mV/, 'the upper plot guide must move to half the edited mV per CO step value');
-  assert.doesNotMatch(liveResults.innerHTML, /[−+]1\.5 mV/, 'the old half-step guide labels must be replaced after recomputation');
+  assert.equal(afterLowerGuide[1], beforeLowerGuide[1], 'the convergence zone must remain independent of the response estimate');
+  assert.equal(afterUpperGuide[1], beforeUpperGuide[1], 'the convergence zone must remain independent of the response estimate');
+  assert.match(liveResults.innerHTML, /−1\.75 mV/, 'the fixed lower convergence guide must remain visible');
+  assert.match(liveResults.innerHTML, /\+1\.75 mV/, 'the fixed upper convergence guide must remain visible');
 
   const gatedResults = baseResults();
   gatedResults.validRows = 20;
   gatedResults.recommendationGate = {
+    state: 'insufficient',
     actionable: false,
-    reason: 'Only 20 complete load rows; at least 30 are required.'
+    reason: 'Only 20 complete load rows; at least 75 are required.'
   };
   const gated = render(api, gatedResults);
   assert.match(gated, /No trial generated/);
