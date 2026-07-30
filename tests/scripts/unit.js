@@ -85,6 +85,9 @@ function loadAnalyzerApi() {
     'filterRowsWithCompleteVidsAsync',
     'calculateVidMeansAsync',
     'calculateAvgCorrelationAsync',
+    'getObservationTiming',
+    'evaluateObservationRequirement',
+    'prepareAnalysisRows',
     'calculateReferenceBaselines',
     'calculateVidStats',
     'calculateClockStretchAsync',
@@ -126,6 +129,39 @@ function makeVidWindow(residuals, count, prefix) {
       1 + residual / 1000
     ])
   ]));
+}
+
+function formatHwinfoDateTime(elapsedMs, { startMs = 12 * 60 * 60 * 1000, shortSeconds = false } = {}) {
+  const dayMs = 24 * 60 * 60 * 1000;
+  const absoluteMs = startMs + elapsedMs;
+  const dayOffset = Math.floor(absoluteMs / dayMs);
+  const timeOfDayMs = ((absoluteMs % dayMs) + dayMs) % dayMs;
+  const hours = Math.floor(timeOfDayMs / 3600000);
+  const minutes = Math.floor((timeOfDayMs % 3600000) / 60000);
+  const seconds = Math.floor((timeOfDayMs % 60000) / 1000);
+  const milliseconds = Math.round(timeOfDayMs % 1000);
+  return {
+    Date: `${16 + dayOffset}.7.2026`,
+    Time: [
+      String(hours).padStart(2, '0'),
+      String(minutes).padStart(2, '0'),
+      shortSeconds ? String(seconds) : String(seconds).padStart(2, '0')
+    ].join(':') + `.${String(milliseconds).padStart(3, '0')}`
+  };
+}
+
+function makeTimedVidRows(residuals, count, intervalMs, prefix, options = {}) {
+  return makeVidWindow(residuals, count, prefix).map((row, index) => ({
+    ...formatHwinfoDateTime(index * intervalMs, options),
+    ...row
+  }));
+}
+
+function makeTimedVidRowsAt(residuals, elapsedTimesMs, prefix, options = {}) {
+  return elapsedTimesMs.map((elapsedMs, index) => ({
+    ...formatHwinfoDateTime(elapsedMs, options),
+    ...makeVidWindow(residuals, 1, `${prefix}-${index}`)[0]
+  }));
 }
 
 const tests = [];
@@ -318,6 +354,193 @@ test('a repeated CSV header splits adjacent qualifying load runs', api => {
   assert.ok(selected.rows.every(row => row.id.startsWith('second-')));
 });
 
+test('elapsed-time qualification is independent of the HWiNFO polling interval', api => {
+  const residuals = [-1, 1];
+  const fast = makeTimedVidRows(residuals, 750, 100, 'fast', { shortSeconds: true });
+  const normal = makeTimedVidRows(residuals, 75, 1000, 'normal');
+  const sparse = makeTimedVidRows(residuals, 38, 2000, 'sparse');
+  const fastButShort = makeTimedVidRows(residuals, 75, 100, 'short');
+  const tooFewReadings = makeTimedVidRows(residuals, 29, 3000, 'too-few');
+
+  const fastTiming = api.getObservationTiming(fast);
+  const normalTiming = api.getObservationTiming(normal);
+  assert.equal(fastTiming.available, true, 'one-digit HWiNFO seconds must parse');
+  assertClose(fastTiming.cadenceMs, 100, 1e-9);
+  assertClose(fastTiming.durationMs, 75000, 1e-9);
+  assertClose(normalTiming.cadenceMs, 1000, 1e-9);
+  assertClose(normalTiming.durationMs, 75000, 1e-9);
+
+  assert.equal(api.evaluateObservationRequirement(fast).sufficient, true);
+  assert.equal(api.evaluateObservationRequirement(normal).sufficient, true);
+  assert.equal(api.evaluateObservationRequirement(sparse).sufficient, true, '38 readings at 2 s cover 76 s');
+  assert.equal(api.evaluateObservationRequirement(fastButShort).sufficient, false, '75 fast readings cover only 7.5 s');
+  assert.equal(api.evaluateObservationRequirement(tooFewReadings).sufficient, false, 'elapsed time cannot replace the 30-reading floor');
+});
+
+test('load-run selection rejects a newer high-frequency run that is too short in time', async api => {
+  const vidCols = ['Core 0 VID [V]', 'Core 1 VID [V]'];
+  const currentColumn = 'CPU Core Current (SVI3 TFN) [A]';
+  const usageColumn = 'Total CPU Usage [%]';
+  const withLoad = (rows, current, usage) => rows.map(row => ({
+    ...row,
+    [currentColumn]: current,
+    [usageColumn]: usage
+  }));
+  const older = withLoad(makeTimedVidRows([-1, 1], 80, 1000, 'older'), 90, 95);
+  const idle = withLoad(makeTimedVidRows([-1, 1], 5, 1000, 'idle', {
+    startMs: 12 * 60 * 60 * 1000 + 80000
+  }), 10, 2);
+  const shortTail = withLoad(makeTimedVidRows([-1, 1], 100, 100, 'short-tail', {
+    startMs: 12 * 60 * 60 * 1000 + 85000
+  }), 92, 97);
+  const rows = [...older, ...idle, ...shortTail];
+  const headers = ['Date', 'Time', currentColumn, usageColumn, ...vidCols];
+  const loadSensor = { note: currentColumn, read: row => Number(row[currentColumn]) };
+
+  const selected = await api.selectAnalysisLoadRunAsync(
+    rows,
+    headers,
+    loadSensor,
+    vidCols,
+    [0, 1],
+    2,
+    'manual',
+    80,
+    0
+  );
+
+  assert.equal(selected.validRows.length, 80);
+  assert.ok(selected.validRows.every(row => row.id.startsWith('older-')));
+  assert.equal(api.evaluateObservationRequirement(selected.validRows).sufficient, true);
+});
+
+test('timed analysis drops ten seconds of warmup and normalizes fast logs near one hertz', api => {
+  const vidCols = ['Core 0 VID [V]', 'Core 1 VID [V]'];
+  const groups = { CPU: [0, 1] };
+  const fast = makeTimedVidRows([-1, 1], 850, 100, 'fast-warm');
+  const normal = makeTimedVidRows([-1, 1], 85, 1000, 'normal-warm');
+
+  const fastPrepared = api.prepareAnalysisRows(fast);
+  const normalPrepared = api.prepareAnalysisRows(normal);
+  const fastSelected = api.selectStableAnalysisRows(fast, vidCols, groups);
+  const normalSelected = api.selectStableAnalysisRows(normal, vidCols, groups);
+
+  assert.ok(fastPrepared.rows.length >= 74 && fastPrepared.rows.length <= 76);
+  assert.equal(normalPrepared.rows.length, 75);
+  assert.ok(fastSelected.rows.length >= 74 && fastSelected.rows.length <= 76);
+  assert.equal(normalSelected.rows.length, 75);
+  assert.equal(api.evaluateObservationRequirement(fastPrepared.rows).sufficient, true);
+  assert.equal(api.evaluateObservationRequirement(normalPrepared.rows).sufficient, true);
+  assert.ok(Number(fastPrepared.rows[0].id.split('-').at(-1)) >= 99, 'the first ten seconds must be omitted');
+  assert.equal(normalPrepared.rows[0].id, 'normal-warm-10');
+  assert.ok(api.getObservationTiming(fastPrepared.rows).cadenceMs >= 900, '100 ms input must not contribute ten times the weight');
+});
+
+test('sub-75-second fast data stays insufficient after preparation and stable-section selection', api => {
+  const vidCols = ['Core 0 VID [V]', 'Core 1 VID [V]'];
+  const groups = { CPU: [0, 1] };
+  const rows = makeTimedVidRows([-1, 1], 746, 100, 'fast-boundary');
+  const prepared = api.prepareAnalysisRows(rows);
+  const selected = api.selectStableAnalysisRows(rows, vidCols, groups);
+
+  assert.equal(api.evaluateObservationRequirement(rows).sufficient, false, '746 readings at 100 ms cover only 74.6 s');
+  assert.equal(
+    api.evaluateObservationRequirement(prepared.rows).sufficient,
+    false,
+    'one-second normalization must not round a 74.6-second source up to 75 seconds'
+  );
+  assert.equal(
+    api.evaluateObservationRequirement(selected.rows).sufficient,
+    false,
+    'stable-section selection must preserve the source duration boundary'
+  );
+  assert.equal(selected.windowStability.stationary, false);
+});
+
+test('timestamped clusters separated by a large gap never fall back to legacy row qualification', api => {
+  const vidCols = ['Core 0 VID [V]', 'Core 1 VID [V]'];
+  const groups = { CPU: [0, 1] };
+  const first = makeTimedVidRows([-1, 1], 40, 1000, 'cluster-a');
+  const second = makeTimedVidRows([-1, 1], 40, 1000, 'cluster-b', {
+    startMs: 12 * 60 * 60 * 1000 + 10 * 60 * 1000
+  });
+  const rows = [...first, ...second];
+  const prepared = api.prepareAnalysisRows(rows);
+  const selected = api.selectStableAnalysisRows(rows, vidCols, groups);
+
+  assert.equal(api.getObservationTiming(rows).available, false, 'the large timestamp gap must form two timing segments');
+  assert.equal(
+    api.evaluateObservationRequirement(rows).sufficient,
+    false,
+    '80 timestamped rows cannot qualify through the untimed 75-row fallback'
+  );
+  assert.equal(api.evaluateObservationRequirement(prepared.rows).sufficient, false);
+  assert.equal(api.evaluateObservationRequirement(selected.rows).sufficient, false);
+  assert.equal(selected.windowStability.stationary, false);
+});
+
+test('short gaps created by the high-current filter remain part of a continuous load run', api => {
+  const fullRun = makeTimedVidRows([-1, 1], 80, 1000, 'continuous');
+  api.getObservationTiming(fullRun);
+  const highCurrentSamples = fullRun.filter((_, index) => index < 35 || index >= 40);
+  const timing = api.getObservationTiming(highCurrentSamples);
+
+  assert.equal(timing.available, true, 'a brief threshold dip must not look like a broken recording');
+  assert.equal(api.evaluateObservationRequirement(highCurrentSamples).sufficient, true);
+});
+
+test('timed analysis keeps only the newest 300 seconds', api => {
+  const rows = makeTimedVidRows([-1, 1], 400, 1000, 'long');
+  const prepared = api.prepareAnalysisRows(rows);
+  const timing = api.getObservationTiming(prepared.rows);
+
+  assert.equal(prepared.rows.length, 300);
+  assert.equal(prepared.rows[0].id, 'long-100');
+  assert.equal(prepared.rows.at(-1).id, 'long-399');
+  assertClose(timing.durationMs, 300000, 1e-9);
+});
+
+test('stationarity windows divide timed samples by elapsed time rather than row count', api => {
+  const first = Array.from({ length: 125 }, (_, index) => index * 200);
+  const second = Array.from({ length: 25 }, (_, index) => 25000 + index * 1000);
+  const third = [
+    ...Array.from({ length: 13 }, (_, index) => 50000 + index * 2000),
+    74800
+  ];
+  const rows = makeTimedVidRowsAt([-1, 1], [...first, ...second, ...third], 'irregular');
+  const stability = api.evaluateWindowStability(
+    rows,
+    ['Core 0 VID [V]', 'Core 1 VID [V]'],
+    { CPU: [0, 1] }
+  );
+
+  assert.equal(stability.stationary, true);
+  assert.deepEqual(plain(stability.windows.map(window => window.rows)), [125, 25, 14]);
+});
+
+test('untimed inputs retain the legacy 75-row fallback and the gate honors timed duration', api => {
+  const untimed74 = makeVidWindow([-1, 1], 74, 'legacy-short');
+  const untimed75 = makeVidWindow([-1, 1], 75, 'legacy-enough');
+  const untimed85 = makeVidWindow([-1, 1], 85, 'legacy-warm');
+  const timedShort = makeTimedVidRows([-1, 1], 75, 100, 'timed-short');
+  const stableConsensus = {
+    stationary: true,
+    windows: [{}, {}, {}],
+    agreedCores: [0],
+    recommendations: { 0: -1 }
+  };
+
+  assert.equal(api.getObservationTiming(untimed75).available, false);
+  assert.equal(api.evaluateObservationRequirement(untimed74).sufficient, false);
+  assert.equal(api.evaluateObservationRequirement(untimed75).sufficient, true);
+  assert.equal(api.prepareAnalysisRows(untimed85).rows.length, 75);
+
+  const timedGate = api.evaluateRecommendationGate(timedShort, { suspectCount: 0 }, 3.0, stableConsensus);
+  const legacyGate = api.evaluateRecommendationGate(untimed75, { suspectCount: 0 }, 3.0, stableConsensus);
+  assert.equal(timedGate.state, 'insufficient', 'a 7.5-second log must not be declared converged');
+  assert.equal(legacyGate.state, 'converged');
+});
+
 test('stable-section selection skips a drifting tail and extends the newest stable plateau', api => {
   const vidCols = ['Core 0 VID [V]', 'Core 1 VID [V]'];
   const groups = { CPU: [0, 1] };
@@ -363,7 +586,7 @@ test('stable-section selection preserves the prepared tail when no 75-row subsec
   assert.equal(selected.omittedEarlierRows, 0);
   assert.equal(selected.omittedLaterRows, 0);
   assert.equal(selected.windowStability.stationary, false);
-  assert.match(selected.windowStability.reason, /drift/i);
+  assert.match(selected.windowStability.reason, /keep the same workload/i);
 });
 
 test('stable-section selection does not reach back past the recent 300-row analysis window', api => {
@@ -434,7 +657,7 @@ test('severe clock stretching is suspect even below the preferred sample count',
   assert.equal(result.suspectCount, 1);
 });
 
-test('recommendation gate separates target, practical, and actionable spread zones', api => {
+test('recommendation gate acts inside the practical zone only with stable agreement', api => {
   const stableConsensus = {
     stationary: true,
     windows: [{}, {}, {}],
@@ -450,13 +673,16 @@ test('recommendation gate separates target, practical, and actionable spread zon
   assert.equal(converged.state, 'converged');
 
   const practical = api.evaluateRecommendationGate(75, noStretch, 4.07, stableConsensus);
-  assert.equal(practical.actionable, false);
-  assert.equal(practical.state, 'practical');
-  assert.match(practical.reason, /Keep the current offsets/);
+  assert.equal(practical.actionable, true);
+  assert.equal(practical.state, 'actionable');
 
-  const practicalBoundary = api.evaluateRecommendationGate(75, noStretch, 4.5, stableConsensus);
+  const practicalBoundary = api.evaluateRecommendationGate(75, noStretch, 4.5, {
+    ...stableConsensus,
+    agreedCores: []
+  });
   assert.equal(practicalBoundary.actionable, false);
   assert.equal(practicalBoundary.state, 'practical');
+  assert.match(practicalBoundary.reason, /Keep the current offsets/);
 
   const invalid = api.evaluateRecommendationGate(75, noStretch, NaN, stableConsensus);
   assert.equal(invalid.actionable, false);
@@ -465,6 +691,42 @@ test('recommendation gate separates target, practical, and actionable spread zon
   const actionable = api.evaluateRecommendationGate(75, noStretch, 4.5001, stableConsensus);
   assert.equal(actionable.actionable, true);
   assert.equal(actionable.state, 'actionable');
+});
+
+test('borderline practical result identifies the core and explains the no-chasing hold', async api => {
+  const vidCols = ['Core 6 VID [V]', 'Core 7 VID [V]'];
+  const makePairWindow = (low, high, count, prefix) => Array.from({ length: count }, (_, index) => ({
+    id: `${prefix}-${index}`,
+    [vidCols[0]]: 1 + low / 1000,
+    [vidCols[1]]: 1 + high / 1000
+  }));
+  const rows = [
+    ...makePairWindow(-1.64, 1.64, 25, 'within-target'),
+    ...makePairWindow(-2.09, 2.09, 25, 'vote-positive-a'),
+    ...makePairWindow(-1.98, 1.98, 25, 'vote-positive-b')
+  ];
+  const current = { 6: 0, 7: 0 };
+  const consensus = await api.evaluateWindowConsensus(
+    rows,
+    vidCols,
+    { CPU: [6, 7] },
+    3.0,
+    current,
+    current
+  );
+
+  assert.equal(consensus.stationary, true);
+  assert.deepEqual(plain(consensus.agreedCores), []);
+  assert.deepEqual(plain(consensus.directionByCore[6]), [0, 1, 1]);
+
+  const gate = api.evaluateRecommendationGate(75, { suspectCount: 0 }, 3.54, consensus, 3.0);
+  assert.equal(gate.state, 'practical');
+  assert.equal(gate.actionable, false);
+  assert.match(gate.reason, /C6 is the borderline core/);
+  assert.match(gate.reason, /2 of 3 windows/);
+  assert.match(gate.reason, /only 0\.04 mV above/);
+  assert.match(gate.reason, /0\.25 mV no-chasing margin/);
+  assert.match(gate.reason, /Keep C6 unchanged/);
 });
 
 test('recommendation gate requires 75 rows and stationary same-core direction agreement', api => {
@@ -631,7 +893,8 @@ test('window consensus rejects one drifting core even when aggregate window metr
   assert.ok(consensus.maxCoreStdDev <= 0.75, 'the fixture must pass the aggregate per-core SD cap');
   assert.ok(consensus.maxVectorRms <= 0.75, 'the fixture must pass the aggregate vector RMS cap');
   assert.equal(consensus.stationary, false);
-  assert.match(consensus.reason, /max core drift/i);
+  assert.match(consensus.reason, /leave the CO offsets unchanged/i);
+  assert.match(consensus.reason, /another minute/i);
 });
 
 test('V1 harmonizer uses the arithmetic group mean', api => {
@@ -671,7 +934,7 @@ test('an individual outlier uses the smallest sufficient correction', api => {
   cores.slice(1).forEach(core => assert.equal(recommendations[core], 0));
 });
 
-test('opposite residuals wider than one step change only one sufficient core', api => {
+test('a practical-zone pair raises the lower requester and preserves the highest requester', api => {
   const vidMeans = {
     'Core 0 VID [V]': 1.00155,
     'Core 1 VID [V]': 0.99801
@@ -685,8 +948,8 @@ test('opposite residuals wider than one step change only one sufficient core', a
 
   assert.ok(stats.stdDev < 3.0, 'fixture must be hidden by the old global RMS criterion');
   assertClose(stats.range, 3.54, 1e-9);
-  assert.equal(recommendations[0], -11, 'one higher-requesting core move is sufficient');
-  assert.equal(recommendations[1], -10, 'the second borderline core must remain untouched');
+  assert.equal(recommendations[0], -10, 'the highest native requester remains the common-offset anchor');
+  assert.equal(recommendations[1], -9, 'one positive-direction step closes the relative field');
 });
 
 test('fixed 3.5 mV optimizer target is independent of CO response and avoids a 3.0 mV cleanup move', api => {
@@ -740,6 +1003,41 @@ test('the user example raises only C2 and leaves borderline C1 untouched', api =
   assert.deepEqual(plain(next), plain(recommendations), 'the selected one-step move must be a fixed point in the ideal response model');
 });
 
+test('an isolated low-VID outlier is raised one step inside the practical zone', api => {
+  const residuals = [-0.16, -0.37, -0.43, 1.12, 0.13, 0.88, -2.57, 1.40];
+  const cores = residuals.map((_, core) => core);
+  const vidMeans = Object.fromEntries(cores.map(core => [`Core ${core} VID [V]`, 1 + residuals[core] / 1000]));
+  const referenceBaselines = Object.fromEntries(cores.map(core => [core, 1]));
+  const current = Object.fromEntries(cores.map(core => [core, 0]));
+  const recommendations = api.calculateOffsets(
+    vidMeans, referenceBaselines, 3.0, current, 3.97, { CPU: cores }, 3.5
+  );
+
+  assert.deepEqual(plain(recommendations), { ...current, 6: 1 });
+  const predictedResiduals = residuals.map((residual, core) =>
+    residual + (recommendations[core] - current[core]) * 3
+  );
+  assertClose(Math.max(...predictedResiduals) - Math.min(...predictedResiduals), 1.83, 1e-9);
+});
+
+test('practical-zone windows must agree before a positive one-step correction is actionable', async api => {
+  const residuals = [-0.16, -0.37, -0.43, 1.12, 0.13, 0.88, -2.57, 1.40];
+  const cores = residuals.map((_, core) => core);
+  const vidCols = cores.map(core => `Core ${core} VID [V]`);
+  const rows = makeVidWindow(residuals, 75, 'practical-low-outlier');
+  const current = Object.fromEntries(cores.map(core => [core, 0]));
+  const consensus = await api.evaluateWindowConsensus(
+    rows, vidCols, { CPU: cores }, 3.0, current
+  );
+
+  assert.equal(consensus.stationary, true);
+  assert.deepEqual(plain(consensus.agreedCores), [6]);
+  assert.deepEqual(plain(consensus.directionByCore[6]), [1, 1, 1]);
+  assert.equal(consensus.recommendations[6], 1);
+  const gate = api.evaluateRecommendationGate(75, { suspectCount: 0 }, 3.97, consensus);
+  assert.equal(gate.actionable, true);
+});
+
 test('the user example is deterministic when VID columns are inserted in reverse order', api => {
   const residuals = [-0.97, 1.51, -1.86, 0.40, -0.31, -0.49, 0.37, 1.34];
   const cores = residuals.map((_, core) => core);
@@ -768,7 +1066,7 @@ test('a narrow field just outside the guides is held inside the hysteresis band'
   const referenceBaselines = Object.fromEntries(cores.map(core => [core, 1]));
   const current = { 0: -19, 1: -12, 2: -19, 3: -20, 4: -19, 5: -13, 6: -24, 7: -23 };
   const recommendations = api.calculateOffsets(
-    vidMeans, referenceBaselines, 3.0, current, 3.33, { CPU: cores }
+    vidMeans, referenceBaselines, 3.0, current, 3.33, { CPU: cores }, 3.5
   );
 
   assert.deepEqual(plain(recommendations), current);
@@ -996,7 +1294,7 @@ test('V1 low-side residual relaxes an existing negative offset', api => {
 
   assert.equal(recommendations[1], -8, 'the group-mean residual rounds to a two-step relaxation');
 });
-test('V1 bounds every recommendation to the supported negative range', api => {
+test('entered positive offsets remain valid premises within the supported input range', api => {
   const vidMeans = {
     'Core 0 VID [V]': 1.000,
     'Core 1 VID [V]': 0.980,
@@ -1016,7 +1314,7 @@ test('V1 bounds every recommendation to the supported negative range', api => {
   );
 
   Object.values(recommendations).forEach(recommendation => {
-    assert.ok(recommendation >= -50 && recommendation <= 0);
+    assert.ok(recommendation >= -50 && recommendation <= 30);
   });
 });
 

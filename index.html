@@ -766,9 +766,16 @@
         const AUTO_LOAD_MIN_FLOOR_A = 20;
         const CLOCK_STRETCH_MIN_ROWS = 100;
         const MIN_ACTIONABLE_ROWS = 75;
+        const MIN_ACTIONABLE_DURATION_MS = 75 * 1000;
+        const MIN_TIMED_ACTIONABLE_ROWS = 30;
         const LOAD_RUN_MAX_GAP = 2;
+        const LOAD_RUN_MAX_GAP_MS = LOAD_RUN_MAX_GAP * 1000;
+        const MAX_FILTERED_OBSERVATION_GAP_MS = 10 * 1000;
         const ANALYSIS_WARMUP_ROWS = 10;
+        const ANALYSIS_WARMUP_MS = 10 * 1000;
         const MAX_ANALYSIS_ROWS = 300;
+        const MAX_ANALYSIS_DURATION_MS = 300 * 1000;
+        const TIME_NORMALIZATION_INTERVAL_MS = 1000;
         const STATIONARITY_WINDOW_COUNT = 3;
         const STATIONARY_MEDIAN_CORE_SD_MV = 0.50;
         const STATIONARY_MAX_CORE_SD_MV = 0.75;
@@ -777,6 +784,9 @@
         const CONVERGED_SPREAD_MV = 3.5;
         const PRACTICAL_SPREAD_MV = 4.5;
         const CO_ACTION_HYSTERESIS_MV = 0.25;
+        const CO_MIN = -50;
+        const CO_INPUT_MAX = 30;
+        const CO_AUTO_POSITIVE_MAX = 3;
 
         updateOffsetInputs();
         updateLoadThresholdMode();
@@ -1235,6 +1245,292 @@
                 .toLowerCase();
         }
 
+        const rowTimingCache = new WeakMap();
+
+        function parseTimeOfDayMs(value) {
+            const match = String(value ?? '').trim().match(/^(\d{1,2}):(\d{1,2}):(\d{1,2})(?:[.,](\d+))?$/);
+            if (!match) return NaN;
+            const hours = Number(match[1]);
+            const minutes = Number(match[2]);
+            const seconds = Number(match[3]);
+            if (hours > 23 || minutes > 59 || seconds > 59) return NaN;
+            const milliseconds = Number((match[4] || '').slice(0, 3).padEnd(3, '0')) || 0;
+            return ((hours * 60 + minutes) * 60 + seconds) * 1000 + milliseconds;
+        }
+
+        function findTimingColumns(rows) {
+            const sample = rows.find(row => row && typeof row === 'object');
+            if (!sample) return { timeColumn: null, dateColumn: null };
+            const keys = Object.keys(sample);
+            const timeColumn = keys.find(key => ['time', 'zeit'].includes(normalizeHeader(key).trim())) || null;
+            const dateColumn = keys.find(key => ['date', 'datum'].includes(normalizeHeader(key).trim())) || null;
+            return { timeColumn, dateColumn };
+        }
+
+        function annotateRowTiming(rows) {
+            if (!Array.isArray(rows) || rows.length === 0) {
+                return { entries: [], cadenceMs: NaN, available: false, timestamped: false };
+            }
+
+            const cached = rows.map(row => row && typeof row === 'object' ? rowTimingCache.get(row) : undefined);
+            if (cached.every(entry => entry !== undefined)) {
+                const cadences = cached.map(entry => entry.sourceCadenceMs).filter(Number.isFinite).sort((a, b) => a - b);
+                const timestamped = cached.some(entry => entry.timestamped);
+                return {
+                    entries: cached,
+                    cadenceMs: cadences.length > 0 ? median(cadences) : NaN,
+                    available: timestamped && cached.filter(entry => entry.valid).length >= 2,
+                    timestamped
+                };
+            }
+
+            const { timeColumn, dateColumn } = findTimingColumns(rows);
+            if (!timeColumn) {
+                const entries = rows.map(row => {
+                    const entry = { valid: false, timestamped: false, sourceCadenceMs: NaN };
+                    if (row && typeof row === 'object') rowTimingCache.set(row, entry);
+                    return entry;
+                });
+                return { entries, cadenceMs: NaN, available: false, timestamped: false };
+            }
+
+            const dayMs = 24 * 60 * 60 * 1000;
+            const provisional = [];
+            let segment = 0;
+            let previousTimeOfDay = NaN;
+            let previousAbsolute = NaN;
+            let previousDate = '';
+
+            rows.forEach(row => {
+                const timeOfDay = parseTimeOfDayMs(row?.[timeColumn]);
+                const dateKey = dateColumn ? String(row?.[dateColumn] ?? '').trim() : '';
+                if (!Number.isFinite(timeOfDay)) {
+                    provisional.push({ valid: false });
+                    segment++;
+                    previousTimeOfDay = NaN;
+                    previousAbsolute = NaN;
+                    previousDate = '';
+                    return;
+                }
+
+                let absolute = timeOfDay;
+                if (Number.isFinite(previousAbsolute)) {
+                    const dateChanged = Boolean(dateColumn && dateKey && previousDate && dateKey !== previousDate);
+                    if (dateChanged || (!dateColumn && previousTimeOfDay - timeOfDay > dayMs / 2)) {
+                        absolute = previousAbsolute + (dayMs - previousTimeOfDay) + timeOfDay;
+                    } else if (timeOfDay >= previousTimeOfDay) {
+                        absolute = previousAbsolute + (timeOfDay - previousTimeOfDay);
+                    } else {
+                        segment++;
+                        absolute = timeOfDay;
+                    }
+                }
+
+                provisional.push({ valid: true, timeMs: absolute, segment });
+                previousTimeOfDay = timeOfDay;
+                previousAbsolute = absolute;
+                previousDate = dateKey;
+            });
+
+            const positiveDeltas = [];
+            for (let index = 1; index < provisional.length; index++) {
+                const previous = provisional[index - 1];
+                const current = provisional[index];
+                if (!previous.valid || !current.valid || previous.segment !== current.segment) continue;
+                const delta = current.timeMs - previous.timeMs;
+                if (delta > 0) positiveDeltas.push(delta);
+            }
+            positiveDeltas.sort((a, b) => a - b);
+            const cadenceMs = positiveDeltas.length > 0 ? median(positiveDeltas) : NaN;
+            const sessionGapMs = Number.isFinite(cadenceMs)
+                ? cadenceMs + LOAD_RUN_MAX_GAP_MS
+                : Infinity;
+
+            const entries = [];
+            let finalSegment = 0;
+            let previous = null;
+            provisional.forEach((entry, index) => {
+                if (!entry.valid) {
+                    const invalid = { valid: false, timestamped: true, sourceCadenceMs: cadenceMs };
+                    entries.push(invalid);
+                    if (rows[index] && typeof rows[index] === 'object') rowTimingCache.set(rows[index], invalid);
+                    finalSegment++;
+                    previous = null;
+                    return;
+                }
+                if (previous && (entry.segment !== previous.segment || entry.timeMs - previous.timeMs > sessionGapMs)) {
+                    finalSegment++;
+                }
+                const timed = {
+                    valid: true,
+                    timestamped: true,
+                    timeMs: entry.timeMs,
+                    segment: finalSegment,
+                    sourceCadenceMs: cadenceMs
+                };
+                entries.push(timed);
+                if (rows[index] && typeof rows[index] === 'object') rowTimingCache.set(rows[index], timed);
+                previous = entry;
+            });
+
+            return {
+                entries,
+                cadenceMs,
+                available: entries.filter(entry => entry.valid).length >= 2,
+                timestamped: true
+            };
+        }
+
+        function getObservationTiming(rows) {
+            const series = annotateRowTiming(rows);
+            if (!series.available || rows.length < 2 || series.entries.some(entry => !entry.valid)) {
+                return {
+                    available: false,
+                    timestamped: series.timestamped,
+                    durationMs: NaN,
+                    cadenceMs: series.cadenceMs,
+                    sampleCount: rows.length,
+                    entries: series.entries,
+                    reason: series.timestamped ? 'Timestamped readings are incomplete or too sparse to form one continuous load run.' : ''
+                };
+            }
+            const segments = new Set(series.entries.map(entry => entry.segment));
+            if (segments.size !== 1) {
+                return {
+                    available: false,
+                    timestamped: true,
+                    durationMs: NaN,
+                    cadenceMs: series.cadenceMs,
+                    sampleCount: rows.length,
+                    entries: series.entries,
+                    reason: 'Timestamped readings cross a gap and do not form one continuous load run.'
+                };
+            }
+            const deltas = [];
+            for (let index = 1; index < series.entries.length; index++) {
+                const delta = series.entries[index].timeMs - series.entries[index - 1].timeMs;
+                const allowedFilteredGapMs = Number.isFinite(series.cadenceMs)
+                    ? series.cadenceMs + MAX_FILTERED_OBSERVATION_GAP_MS
+                    : NaN;
+                if (delta < 0 || (Number.isFinite(allowedFilteredGapMs) && delta > allowedFilteredGapMs)) {
+                    return {
+                        available: false,
+                        timestamped: true,
+                        durationMs: NaN,
+                        cadenceMs: series.cadenceMs,
+                        sampleCount: rows.length,
+                        entries: series.entries,
+                        reason: 'Timestamped readings cross a gap and do not form one continuous load run.'
+                    };
+                }
+                if (delta > 0) deltas.push(delta);
+            }
+            deltas.sort((a, b) => a - b);
+            const cadenceMs = deltas.length > 0 ? median(deltas) : series.cadenceMs;
+            const first = series.entries[0].timeMs;
+            const last = series.entries[series.entries.length - 1].timeMs;
+            const durationMs = Number.isFinite(cadenceMs) && last >= first ? last - first + cadenceMs : NaN;
+            return {
+                available: Number.isFinite(durationMs) && durationMs > 0,
+                timestamped: true,
+                durationMs,
+                cadenceMs,
+                sampleCount: rows.length,
+                startMs: first,
+                endMs: last + cadenceMs,
+                entries: series.entries
+            };
+        }
+
+        function evaluateObservationRequirement(rowsOrCount) {
+            if (Array.isArray(rowsOrCount)) {
+                const timing = getObservationTiming(rowsOrCount);
+                if (timing.available) {
+                    const enoughSamples = rowsOrCount.length >= MIN_TIMED_ACTIONABLE_ROWS;
+                    const enoughDuration = timing.durationMs + 1e-6 >= MIN_ACTIONABLE_DURATION_MS;
+                    return {
+                        sufficient: enoughSamples && enoughDuration,
+                        mode: 'time',
+                        sampleCount: rowsOrCount.length,
+                        durationMs: timing.durationMs,
+                        timing
+                    };
+                }
+                if (timing.timestamped) {
+                    return {
+                        sufficient: false,
+                        mode: 'time',
+                        sampleCount: rowsOrCount.length,
+                        durationMs: timing.durationMs,
+                        timing,
+                        reason: timing.reason
+                    };
+                }
+                return {
+                    sufficient: rowsOrCount.length >= MIN_ACTIONABLE_ROWS,
+                    mode: 'rows',
+                    sampleCount: rowsOrCount.length,
+                    durationMs: NaN,
+                    timing
+                };
+            }
+            const sampleCount = Number(rowsOrCount) || 0;
+            return {
+                sufficient: sampleCount >= MIN_ACTIONABLE_ROWS,
+                mode: 'rows',
+                sampleCount,
+                durationMs: NaN,
+                timing: null
+            };
+        }
+
+        function observationRequirementScore(requirement) {
+            if (requirement.mode === 'time') {
+                const durationScore = Number.isFinite(requirement.durationMs)
+                    ? requirement.durationMs / MIN_ACTIONABLE_DURATION_MS
+                    : 0;
+                return Math.min(
+                    durationScore,
+                    requirement.sampleCount / MIN_TIMED_ACTIONABLE_ROWS
+                );
+            }
+            return requirement.sampleCount / MIN_ACTIONABLE_ROWS;
+        }
+
+        function normalizeTimedRows(rows) {
+            const timing = getObservationTiming(rows);
+            const requirement = evaluateObservationRequirement(rows);
+            if (!requirement.sufficient || !timing.available || timing.cadenceMs >= TIME_NORMALIZATION_INTERVAL_MS * 0.8) {
+                return { rows, resampled: false, sourceRows: rows.length, timing };
+            }
+
+            const buckets = new Map();
+            timing.entries.forEach((entry, index) => {
+                const bucket = Math.floor((entry.timeMs - timing.startMs) / TIME_NORMALIZATION_INTERVAL_MS);
+                if (!buckets.has(bucket)) buckets.set(bucket, []);
+                buckets.get(bucket).push({ row: rows[index], timeMs: entry.timeMs });
+            });
+            const normalized = [...buckets.entries()].map(([bucket, candidates]) => {
+                const center = timing.startMs + bucket * TIME_NORMALIZATION_INTERVAL_MS + TIME_NORMALIZATION_INTERVAL_MS / 2;
+                return candidates.reduce((best, candidate) =>
+                    Math.abs(candidate.timeMs - center) < Math.abs(best.timeMs - center) ? candidate : best
+                ).row;
+            });
+            return {
+                rows: normalized,
+                resampled: normalized.length !== rows.length,
+                sourceRows: rows.length,
+                timing: getObservationTiming(normalized)
+            };
+        }
+
+        function formatElapsedDuration(durationMs) {
+            if (!Number.isFinite(durationMs)) return '';
+            const seconds = durationMs / 1000;
+            const flooredTenths = Math.floor(seconds * 10 + 1e-6) / 10;
+            return `${flooredTenths.toFixed(1)} s`;
+        }
+
         function headerHasUnit(header, unit) {
             return new RegExp(`\\[\\s*${unit}\\s*\\]`, 'i').test(header);
         }
@@ -1474,6 +1770,7 @@
             const detail = skippedRows > 0
                 ? `${rows.length.toLocaleString()} rows, ${skippedRows.toLocaleString()} skipped`
                 : `${rows.length.toLocaleString()} rows`;
+            annotateRowTiming(rows);
             await paintProgress('Parsing CSV', 35, detail);
             return { headers, rows };
         }
@@ -1765,12 +2062,15 @@
                 const railContext = calculateRailContext(validRows, data.headers, loadSensor);
                 const proposedRecommendations = calculateOffsets(vidMeans, referenceBaselines, mvStep, currentOffsets, residualRange, groups, CONVERGED_SPREAD_MV);
                 const windowConsensus = evaluateWindowConsensus(validRows, vidCols, groups, mvStep, currentOffsets, proposedRecommendations);
-                const recommendationGate = evaluateRecommendationGate(validRows.length, clockStretch, residualRange, windowConsensus);
+                const recommendationGate = evaluateRecommendationGate(validRows, clockStretch, residualRange, windowConsensus, mvStep);
                 const recommendations = recommendationGate.actionable
                     ? windowConsensus.recommendations
                     : preserveCurrentOffsets(vidMeans, currentOffsets);
 
-                await paintProgress('Rendering results', 97, `${validRows.length.toLocaleString()} filtered rows`);
+                const evidenceLabel = preparedRows.timed
+                    ? `${formatElapsedDuration(preparedRows.timing?.durationMs)} · ${validRows.length.toLocaleString()} samples`
+                    : `${validRows.length.toLocaleString()} filtered rows`;
+                await paintProgress('Rendering results', 97, evidenceLabel);
                 displayResultsV2(resultsDiv, {
                     totalRows: data.rows.length,
                     validRows: validRows.length,
@@ -1798,8 +2098,8 @@
                     loadSensor,
                     railContext
                 });
-                setProgress('Analysis complete', 100, `${validRows.length.toLocaleString()} rows from one load run`);
-                setStatus(`Analysis complete · ${validRows.length.toLocaleString()} rows`);
+                setProgress('Analysis complete', 100, `${evidenceLabel} from one load run`);
+                setStatus(`Analysis complete · ${evidenceLabel}`);
             } catch (error) {
                 if (error.cancelled) return;
                 clearProgress();
@@ -1813,6 +2113,11 @@
 
         function findContiguousLoadRuns(rows, loadSensor, minCurrent, usageSensor = null, minUsage = null, maxGap = LOAD_RUN_MAX_GAP) {
             const runs = [];
+            const timingSeries = annotateRowTiming(rows);
+            const useTiming = timingSeries.available && Number.isFinite(timingSeries.cadenceMs);
+            const allowedGapMs = useTiming
+                ? timingSeries.cadenceMs + maxGap * 1000
+                : NaN;
             let startIndex = -1;
             let lastMatchIndex = -1;
             let matchedRows = 0;
@@ -1833,12 +2138,16 @@
             };
 
             rows.forEach((row, index) => {
+                const timing = timingSeries.entries[index];
                 const entries = Object.entries(row || {});
                 const repeatedHeaderMatches = entries.reduce((count, [column, value]) =>
                     count + (String(value ?? '').trim() === String(column).trim() ? 1 : 0), 0);
                 const isRepeatedHeader = entries.length > 0
                     && repeatedHeaderMatches >= Math.min(3, entries.length);
-                if (isRepeatedHeader) {
+                const previousTiming = index > 0 ? timingSeries.entries[index - 1] : null;
+                const timingBreak = useTiming && (!timing?.valid
+                    || (previousTiming?.valid && timing.segment !== previousTiming.segment));
+                if (isRepeatedHeader || timingBreak) {
                     finishRun();
                     return;
                 }
@@ -1852,13 +2161,23 @@
                 const matches = currentMatches && usageMatches;
 
                 if (matches) {
+                    const elapsedSinceLastMatch = useTiming && startIndex >= 0
+                        && timing?.valid && timingSeries.entries[lastMatchIndex]?.valid
+                        ? timing.timeMs - timingSeries.entries[lastMatchIndex].timeMs
+                        : NaN;
+                    if (Number.isFinite(elapsedSinceLastMatch) && elapsedSinceLastMatch > allowedGapMs) {
+                        finishRun();
+                    }
                     if (startIndex < 0) startIndex = index;
                     lastMatchIndex = index;
                     matchedRows++;
                     gap = 0;
                 } else if (startIndex >= 0) {
                     gap++;
-                    if (gap > maxGap) finishRun();
+                    const elapsedGapMs = useTiming && timing?.valid && timingSeries.entries[lastMatchIndex]?.valid
+                        ? timing.timeMs - timingSeries.entries[lastMatchIndex].timeMs
+                        : NaN;
+                    if (Number.isFinite(elapsedGapMs) ? elapsedGapMs > allowedGapMs : gap > maxGap) finishRun();
                 }
             });
             finishRun();
@@ -1944,8 +2263,12 @@
                         }
                     };
 
-                    if (validRows.length >= MIN_ACTIONABLE_ROWS) return candidate;
-                    if (!best || validRows.length > best.validRows.length) best = candidate;
+                    const requirement = evaluateObservationRequirement(validRows);
+                    candidate.observationRequirement = requirement;
+                    if (requirement.sufficient) return candidate;
+                    if (!best || observationRequirementScore(requirement) > observationRequirementScore(best.observationRequirement)) {
+                        best = candidate;
+                    }
                 } catch (error) {
                     if (error.cancelled) throw error;
                     lastError = error;
@@ -1958,6 +2281,40 @@
         }
 
         function prepareAnalysisRows(rows) {
+            const sourceTiming = getObservationTiming(rows);
+            if (sourceTiming.available) {
+                let warmupRows = 0;
+                const warmupCutoff = sourceTiming.startMs + ANALYSIS_WARMUP_MS;
+                const candidateWarmupRows = sourceTiming.entries.findIndex(entry => entry.timeMs >= warmupCutoff);
+                if (candidateWarmupRows > 0
+                    && evaluateObservationRequirement(rows.slice(candidateWarmupRows)).sufficient) {
+                    warmupRows = candidateWarmupRows;
+                }
+
+                const warmed = rows.slice(warmupRows);
+                const warmedTiming = getObservationTiming(warmed);
+                const recentCutoff = warmedTiming.endMs - MAX_ANALYSIS_DURATION_MS;
+                const recentStart = warmedTiming.durationMs > MAX_ANALYSIS_DURATION_MS
+                    ? Math.max(0, warmedTiming.entries.findIndex(entry => entry.timeMs >= recentCutoff))
+                    : 0;
+                const recentRows = warmed.slice(recentStart);
+                const normalized = normalizeTimedRows(recentRows);
+                return {
+                    rows: normalized.rows,
+                    matchedRows: rows.length,
+                    sourceRows: recentRows.length,
+                    warmupRows,
+                    omittedEarlierRows: recentStart,
+                    omittedLaterRows: 0,
+                    stableSelection: false,
+                    windowStability: null,
+                    timed: true,
+                    resampled: normalized.resampled,
+                    timing: normalized.timing,
+                    sourceTiming
+                };
+            }
+
             const warmupRows = rows.length - ANALYSIS_WARMUP_ROWS >= MIN_ACTIONABLE_ROWS
                 ? ANALYSIS_WARMUP_ROWS
                 : 0;
@@ -1970,18 +2327,35 @@
                 omittedEarlierRows: Math.max(0, warmed.length - tailRows),
                 omittedLaterRows: 0,
                 stableSelection: false,
-                windowStability: null
+                windowStability: null,
+                timed: false,
+                resampled: false,
+                timing: null,
+                sourceTiming
             };
+        }
+
+        function findObservationSeedStart(rows, end) {
+            const candidate = rows.slice(0, end);
+            const timing = getObservationTiming(candidate);
+            if (!timing.available) {
+                return end >= MIN_ACTIONABLE_ROWS ? end - MIN_ACTIONABLE_ROWS : -1;
+            }
+            if (end < MIN_TIMED_ACTIONABLE_ROWS) return -1;
+            let start = end - MIN_TIMED_ACTIONABLE_ROWS;
+            const endMs = timing.entries[end - 1].timeMs + timing.cadenceMs;
+            while (start > 0 && endMs - timing.entries[start].timeMs < MIN_ACTIONABLE_DURATION_MS) {
+                start--;
+            }
+            return evaluateObservationRequirement(rows.slice(start, end)).sufficient ? start : -1;
         }
 
         function selectStableAnalysisRows(rows, vidCols, groups) {
             const prepared = prepareAnalysisRows(rows);
-            const warmupRows = prepared.warmupRows;
-            const warmed = rows.slice(warmupRows);
-            const searchBase = Math.max(0, warmed.length - MAX_ANALYSIS_ROWS);
-            const searchRows = warmed.slice(searchBase);
+            const searchRows = prepared.rows;
+            const requirement = evaluateObservationRequirement(searchRows);
 
-            if (searchRows.length < MIN_ACTIONABLE_ROWS || vidCols.length === 0) {
+            if (!requirement.sufficient || vidCols.length === 0) {
                 return {
                     ...prepared,
                     windowStability: evaluateWindowStability(prepared.rows, vidCols, groups)
@@ -1990,14 +2364,16 @@
 
             // Search newest to oldest. The selector considers only stationarity and
             // recency, never VID spread or the offsets it would recommend.
-            for (let end = searchRows.length; end >= MIN_ACTIONABLE_ROWS; end--) {
-                let start = end - MIN_ACTIONABLE_ROWS;
+            const minimumEnd = requirement.mode === 'time' ? MIN_TIMED_ACTIONABLE_ROWS : MIN_ACTIONABLE_ROWS;
+            for (let end = searchRows.length; end >= minimumEnd; end--) {
+                let start = findObservationSeedStart(searchRows, end);
+                if (start < 0) continue;
                 let stability = evaluateWindowStability(searchRows.slice(start, end), vidCols, groups);
                 if (!stability.stationary) continue;
 
                 // Keep the newest endpoint fixed and extend the stable section
                 // backward, up to the normal analysis cap.
-                while (start > 0 && end - start < MAX_ANALYSIS_ROWS) {
+                while (start > 0) {
                     const nextStart = start - 1;
                     const extended = evaluateWindowStability(searchRows.slice(nextStart, end), vidCols, groups);
                     if (!extended.stationary) break;
@@ -2006,13 +2382,13 @@
                 }
 
                 return {
+                    ...prepared,
                     rows: searchRows.slice(start, end),
-                    matchedRows: rows.length,
-                    warmupRows,
-                    omittedEarlierRows: searchBase + start,
-                    omittedLaterRows: searchRows.length - end,
+                    omittedEarlierRows: prepared.omittedEarlierRows + start,
+                    omittedLaterRows: prepared.omittedLaterRows + searchRows.length - end,
                     stableSelection: true,
-                    windowStability: stability
+                    windowStability: stability,
+                    timing: getObservationTiming(searchRows.slice(start, end))
                 };
             }
 
@@ -2394,10 +2770,11 @@
                 : latestAnalysisResults.windowConsensus;
             const recommendationGate = canRefreshConsensus
                 ? evaluateRecommendationGate(
-                    latestAnalysisResults.analysisRows.length,
+                    latestAnalysisResults.analysisRows,
                     latestAnalysisResults.clockStretch,
                     residualRange,
-                    windowConsensus
+                    windowConsensus,
+                    mvStep
                 )
                 : latestAnalysisResults.recommendationGate;
             const recommendations = recommendationGate?.actionable
@@ -2461,7 +2838,11 @@
 
         function evaluateWindowStability(validRows, vidCols, groups) {
             const coreIndexes = vidCols.map(getCoreIndexFromVidColumn).filter(core => core !== null);
-            if (validRows.length < MIN_ACTIONABLE_ROWS || vidCols.length === 0) {
+            const observationRequirement = evaluateObservationRequirement(validRows);
+            if (!observationRequirement.sufficient || vidCols.length === 0) {
+                const requirementText = observationRequirement.mode === 'time'
+                    ? `At least ${MIN_ACTIONABLE_DURATION_MS / 1000} seconds and ${MIN_TIMED_ACTIONABLE_ROWS} readings are required for ${STATIONARITY_WINDOW_COUNT} comparison windows.`
+                    : `At least ${MIN_ACTIONABLE_ROWS} matched rows are required for ${STATIONARITY_WINDOW_COUNT} comparison windows.`;
                 return {
                     stationary: false,
                     windows: [],
@@ -2470,15 +2851,44 @@
                     maxCoreStdDev: Infinity,
                     maxCoreDrift: Infinity,
                     maxVectorRms: Infinity,
-                    reason: `At least ${MIN_ACTIONABLE_ROWS} matched rows are required for ${STATIONARITY_WINDOW_COUNT} comparison windows.`
+                    observationRequirement,
+                    reason: requirementText
                 };
             }
 
+            const timing = observationRequirement.timing;
+            const boundaries = [0];
+            if (observationRequirement.mode === 'time') {
+                for (let index = 1; index < STATIONARITY_WINDOW_COUNT; index++) {
+                    const boundaryMs = timing.startMs + timing.durationMs * index / STATIONARITY_WINDOW_COUNT;
+                    const boundaryIndex = timing.entries.findIndex(entry => entry.timeMs >= boundaryMs);
+                    boundaries.push(boundaryIndex < 0 ? validRows.length : boundaryIndex);
+                }
+            } else {
+                for (let index = 1; index < STATIONARITY_WINDOW_COUNT; index++) {
+                    boundaries.push(Math.floor((index * validRows.length) / STATIONARITY_WINDOW_COUNT));
+                }
+            }
+            boundaries.push(validRows.length);
+
             const windows = [];
             for (let index = 0; index < STATIONARITY_WINDOW_COUNT; index++) {
-                const start = Math.floor((index * validRows.length) / STATIONARITY_WINDOW_COUNT);
-                const end = Math.floor(((index + 1) * validRows.length) / STATIONARITY_WINDOW_COUNT);
+                const start = boundaries[index];
+                const end = boundaries[index + 1];
                 const rows = validRows.slice(start, end);
+                if (observationRequirement.mode === 'time' && rows.length < MIN_TIMED_ACTIONABLE_ROWS / STATIONARITY_WINDOW_COUNT) {
+                    return {
+                        stationary: false,
+                        windows: [],
+                        coreStdDevs: {},
+                        medianCoreStdDev: Infinity,
+                        maxCoreStdDev: Infinity,
+                        maxCoreDrift: Infinity,
+                        maxVectorRms: Infinity,
+                        observationRequirement,
+                        reason: `Each elapsed-time comparison window needs at least ${MIN_TIMED_ACTIONABLE_ROWS / STATIONARITY_WINDOW_COUNT} readings.`
+                    };
+                }
                 const vidMeans = calculateWindowVidMeans(rows, vidCols);
                 const { referenceBaselines } = calculateReferenceBaselines(vidMeans, groups);
                 windows.push({
@@ -2514,7 +2924,7 @@
                 && maxVectorRms <= STATIONARY_MAX_VECTOR_RMS_MV + 1e-9;
             const reason = stationary
                 ? ''
-                : `Window drift is too high (median core SD ${medianCoreStdDev.toFixed(2)} mV, max core drift ${maxCoreDrift.toFixed(2)} mV, vector RMS ${maxVectorRms.toFixed(2)} mV).`;
+                : 'The load readings are still shifting. Leave the CO offsets unchanged, keep the same workload and HWiNFO logging running for another minute, then analyze the updated file.';
 
             return {
                 stationary,
@@ -2524,6 +2934,7 @@
                 maxCoreStdDev,
                 maxCoreDrift,
                 maxVectorRms,
+                observationRequirement,
                 reason
             };
         }
@@ -2544,7 +2955,7 @@
 
             const windows = stability.windows.map(window => ({
                 ...window,
-                recommendations: window.residualRange > PRACTICAL_SPREAD_MV + 1e-9
+                recommendations: window.residualRange > CONVERGED_SPREAD_MV + 1e-9
                     ? calculateOffsets(window.vidMeans, window.referenceBaselines, mvStep, current, window.residualRange, groups, CONVERGED_SPREAD_MV)
                     : { ...unchanged }
             }));
@@ -2560,11 +2971,16 @@
             const recommendations = { ...unchanged };
             const agreedCores = [];
             const directionByCore = {};
+            coreIndexes.forEach(core => {
+                const directions = windows.map(window => Math.sign((window.recommendations[core] ?? current[core]) - current[core]));
+                if (directions.some(direction => direction !== 0)) directionByCore[core] = directions;
+            });
             Object.entries(proposed).forEach(([coreKey, proposedValue]) => {
                 const core = Number(coreKey);
                 const overallDirection = Math.sign(proposedValue - current[core]);
                 if (overallDirection === 0) return;
-                const directions = windows.map(window => Math.sign((window.recommendations[core] ?? current[core]) - current[core]));
+                const directions = directionByCore[core]
+                    || windows.map(window => Math.sign((window.recommendations[core] ?? current[core]) - current[core]));
                 directionByCore[core] = directions;
                 if (stability.stationary && directions.every(direction => direction === overallDirection)) {
                     recommendations[core] = proposedValue;
@@ -2587,12 +3003,35 @@
             };
         }
 
-        function evaluateRecommendationGate(validRowCount, clockStretch, residualRange, windowConsensus) {
-            if (validRowCount < MIN_ACTIONABLE_ROWS) {
+        function findBorderlineWindowCandidate(windowConsensus) {
+            const candidates = Object.entries(windowConsensus?.directionByCore || {}).map(([coreKey, directions]) => {
+                const positiveVotes = directions.filter(direction => direction > 0).length;
+                const negativeVotes = directions.filter(direction => direction < 0).length;
+                if (positiveVotes > 0 && negativeVotes > 0) return null;
+                const votes = Math.max(positiveVotes, negativeVotes);
+                if (votes === 0) return null;
+                return {
+                    core: Number(coreKey),
+                    direction: positiveVotes > 0 ? 1 : -1,
+                    votes,
+                    total: directions.length
+                };
+            }).filter(Boolean).sort((left, right) => right.votes - left.votes || left.core - right.core);
+            return candidates[0] || null;
+        }
+
+        function evaluateRecommendationGate(validRowsOrCount, clockStretch, residualRange, windowConsensus, mvStep = 3.0) {
+            const observationRequirement = evaluateObservationRequirement(validRowsOrCount);
+            if (!observationRequirement.sufficient) {
+                const reason = observationRequirement.mode === 'time'
+                    ? (Number.isFinite(observationRequirement.durationMs)
+                        ? `Only ${formatElapsedDuration(observationRequirement.durationMs)} across ${observationRequirement.sampleCount.toLocaleString()} complete load readings; at least ${MIN_ACTIONABLE_DURATION_MS / 1000} seconds and ${MIN_TIMED_ACTIONABLE_ROWS} readings are required.`
+                        : observationRequirement.reason || 'Timestamped readings do not form one continuous load run.')
+                    : `Only ${observationRequirement.sampleCount} complete load rows; at least ${MIN_ACTIONABLE_ROWS} are required.`;
                 return {
                     state: 'insufficient',
                     actionable: false,
-                    reason: `Only ${validRowCount} complete load rows; at least ${MIN_ACTIONABLE_ROWS} are required.`
+                    reason
                 };
             }
             if (clockStretch?.suspectCount > 0) {
@@ -2612,18 +3051,41 @@
                     reason: `Highest-to-lowest VID spread is ${residualRange.toFixed(2)} mV, within the ${CONVERGED_SPREAD_MV.toFixed(1)} mV convergence zone.`
                 };
             }
-            if (residualRange <= PRACTICAL_SPREAD_MV + 1e-9) {
-                return {
-                    state: 'practical',
-                    actionable: false,
-                    reason: `VID spread is ${residualRange.toFixed(2)} mV, within the ${PRACTICAL_SPREAD_MV.toFixed(1)} mV practical convergence limit. Keep the current offsets.`
-                };
-            }
             if (!windowConsensus?.stationary) {
                 return {
                     state: 'unstable',
                     actionable: false,
                     reason: windowConsensus?.reason || 'The three load windows are not stationary enough to justify another offset change.'
+                };
+            }
+            if (windowConsensus.agreedCores?.length) {
+                return {
+                    state: 'actionable',
+                    actionable: true,
+                    reason: `Three stationary windows agree on ${windowConsensus.agreedCores.map(core => `C${core}`).join(', ')}.`
+                };
+            }
+            if (residualRange <= PRACTICAL_SPREAD_MV + 1e-9) {
+                const actionMargin = calculateActionHysteresis(mvStep);
+                const targetExcess = Math.max(0, residualRange - CONVERGED_SPREAD_MV);
+                const candidate = findBorderlineWindowCandidate(windowConsensus);
+                if (residualRange <= CONVERGED_SPREAD_MV + actionMargin + 1e-9) {
+                    const candidateText = candidate
+                        ? `C${candidate.core} is the borderline core: ${candidate.votes === candidate.total ? `all ${candidate.total}` : `${candidate.votes} of ${candidate.total}`} windows support one step more ${candidate.direction > 0 ? 'positive' : 'negative'}${candidate.votes < candidate.total ? `, while ${candidate.total - candidate.votes} ${candidate.total - candidate.votes === 1 ? 'window does' : 'windows do'} not` : ''}. `
+                        : '';
+                    const keepText = candidate ? `Keep C${candidate.core} unchanged.` : 'Keep the current offsets.';
+                    return {
+                        state: 'practical',
+                        actionable: false,
+                        reason: `${candidateText}VID spread is ${residualRange.toFixed(2)} mV, only ${targetExcess.toFixed(2)} mV above the ${CONVERGED_SPREAD_MV.toFixed(1)} mV target and inside the ${actionMargin.toFixed(2)} mV no-chasing margin. ${keepText}`
+                    };
+                }
+                return {
+                    state: 'practical',
+                    actionable: false,
+                    reason: candidate
+                        ? `C${candidate.core} is the borderline core, but only ${candidate.votes} of ${candidate.total} windows support one step more ${candidate.direction > 0 ? 'positive' : 'negative'}. Keep C${candidate.core} unchanged.`
+                        : `VID spread is ${residualRange.toFixed(2)} mV, but the three windows do not consistently support the same one-step core change. Keep the current offsets.`
                 };
             }
             if (!windowConsensus.agreedCores?.length) {
@@ -2633,11 +3095,7 @@
                     reason: windowConsensus.reason || 'The three load windows do not agree on the same core and direction.'
                 };
             }
-            return {
-                state: 'actionable',
-                actionable: true,
-                reason: `Three stationary windows agree on ${windowConsensus.agreedCores.map(core => `C${core}`).join(', ')}.`
-            };
+            return { state: 'disagreement', actionable: false, reason: 'No consistent harmonization move was found.' };
         }
 
         function calculateOffsets(vidMeans, referenceBaselines, mvStep, currentOffsets, residualRange, groups = null, targetRange = mvStep) {
@@ -2663,7 +3121,10 @@
                 const originalRange = calculateResidualRange(groupItems.map(item => item.residual));
                 if (originalRange <= resolvedTargetRange + actionHysteresis + 1e-9) return;
 
-                const choice = findMinimalHarmonization(groupItems, mvStep, originalRange, resolvedTargetRange);
+                const practicalZone = originalRange <= PRACTICAL_SPREAD_MV + 1e-9;
+                const choice = practicalZone
+                    ? findPracticalOneStepAlignment(groupItems, mvStep, originalRange, resolvedTargetRange)
+                    : findMinimalHarmonization(groupItems, mvStep, originalRange, resolvedTargetRange);
                 if (!choice) return;
                 choice.forEach(option => {
                     recommendations[option.core] = option.offset;
@@ -2674,7 +3135,7 @@
         }
 
         function clampCoOffset(value) {
-            return Math.max(-50, Math.min(0, Math.round(value)));
+            return Math.max(CO_MIN, Math.min(CO_INPUT_MAX, Math.round(value)));
         }
 
         function calculateActionHysteresis(mvStep) {
@@ -2714,6 +3175,39 @@
             return resolved;
         }
 
+        function findPracticalOneStepAlignment(items, mvStep, originalRange, targetRange) {
+            const actionHysteresis = calculateActionHysteresis(mvStep);
+            const anchor = items.reduce((highest, item) => {
+                const nativeResidual = item.residual - item.current * mvStep;
+                const highestNativeResidual = highest.residual - highest.current * mvStep;
+                return nativeResidual > highestNativeResidual + 1e-9 ||
+                    (Math.abs(nativeResidual - highestNativeResidual) <= 1e-9 && item.core < highest.core)
+                    ? item
+                    : highest;
+            });
+            let best = null;
+
+            items.forEach(item => {
+                [-1, 1].forEach(delta => {
+                    const offset = item.current + delta;
+                    if (item.core === anchor.core || offset < CO_MIN || offset > CO_INPUT_MAX) return;
+                    if (delta > 0 && offset > CO_AUTO_POSITIVE_MAX) return;
+
+                    const selected = items.map(candidate => ({
+                        core: candidate.core,
+                        offset: candidate.core === item.core ? offset : candidate.current,
+                        residual: candidate.residual + (candidate.core === item.core ? delta * mvStep : 0),
+                        steps: candidate.core === item.core ? 1 : 0
+                    }));
+                    const scored = scoreHarmonization(selected, originalRange);
+                    if (scored.range > targetRange + 1e-9 || scored.improvement < actionHysteresis - 1e-9) return;
+                    if (!best || compareHarmonizationScores(scored, best) < 0) best = scored;
+                });
+            });
+
+            return best ? best.selected : null;
+        }
+
         function findMinimalHarmonization(items, mvStep, originalRange, targetRange = mvStep) {
             const actionHysteresis = calculateActionHysteresis(mvStep);
             const actionThreshold = mvStep * 0.5 + actionHysteresis;
@@ -2723,7 +3217,7 @@
 
                 const firstDelta = calculateAdaptiveStep(item.residual, mvStep, originalRange, actionThreshold);
                 const direction = Math.sign(firstDelta);
-                const availableSteps = direction < 0 ? item.current + 50 : -item.current;
+                const availableSteps = direction < 0 ? item.current - CO_MIN : Math.max(0, -item.current);
                 for (let steps = 1; steps <= availableSteps; steps++) {
                     const offset = clampCoOffset(item.current + direction * steps);
                     if (offset === item.current || options.some(option => option.offset === offset)) continue;
@@ -2781,13 +3275,13 @@
             const minimum = Math.min(...items.map(item => item.residual));
             const maximum = Math.max(...items.map(item => item.residual));
             return items.some(item => item.residual <= minimum + 1e-9 && item.current === 0) ||
-                items.some(item => item.residual >= maximum - 1e-9 && item.current === -50);
+                items.some(item => item.residual >= maximum - 1e-9 && item.current === CO_MIN);
         }
 
         function buildExpandedOptionSets(items, mvStep) {
             return items.map(item => {
                 const options = [];
-                for (let offset = -50; offset <= 0; offset++) {
+                for (let offset = CO_MIN; offset <= Math.max(0, item.current); offset++) {
                     options.push({
                         core: item.core,
                         offset,
@@ -3588,9 +4082,15 @@
                         subtitle: results.recommendationGate.reason
                     };
                 }
-                if (['unstable', 'disagreement'].includes(results.recommendationGate?.state)) {
+                if (results.recommendationGate?.state === 'unstable') {
                     return {
-                        title: 'Hold and remeasure',
+                        title: 'Keep measuring',
+                        subtitle: results.recommendationGate.reason
+                    };
+                }
+                if (results.recommendationGate?.state === 'disagreement') {
+                    return {
+                        title: 'Keep offsets unchanged',
                         subtitle: results.recommendationGate.reason
                     };
                 }
@@ -3724,7 +4224,7 @@
                 ['Median VID', Number.isFinite(medianVid) ? `${medianVid.toFixed(4)} V` : '—'],
                 ['Load', Number.isFinite(current) ? `${current.toFixed(1)} A` : '—'],
                 ['VDD', Number.isFinite(railVoltage) ? `${railVoltage.toFixed(4)} V` : '—'],
-                ['Rows', results.validRows.toLocaleString()]
+                [results.preparedRows?.timed ? 'Samples' : 'Rows', results.validRows.toLocaleString()]
             ];
 
             return `<div class="summary-strip">${stats.map(([label, value]) => `
@@ -3766,14 +4266,17 @@
                 ? `; ${preparedRows.omittedLaterRows.toLocaleString()} newer rows excluded by the stability check`
                 : '';
             const selectionKind = preparedRows?.stableSelection ? 'stable rows selected' : 'recent rows analyzed';
+            const timedSelection = preparedRows?.timed
+                ? `${formatElapsedDuration(preparedRows.timing?.durationMs)} across ${results.validRows.toLocaleString()} ${preparedRows.stableSelection ? 'stable ' : ''}samples${preparedRows.resampled ? ', normalized to about 1 Hz' : ''}`
+                : `${results.validRows.toLocaleString()} ${selectionKind}`;
             const selectedRun = runSelection
-                ? `${runSelection.matchedRows.toLocaleString()} loaded rows; ${results.validRows.toLocaleString()} ${selectionKind}${stableTail}`
-                : `${results.validRows.toLocaleString()} ${selectionKind}${stableTail}`;
+                ? `${runSelection.matchedRows.toLocaleString()} loaded readings; ${timedSelection}${stableTail}`
+                : `${timedSelection}${stableTail}`;
             const windowStability = results.windowConsensus?.windows?.length
                 ? results.windowConsensus.stationary
-                    ? `Stable · max core drift ${results.windowConsensus.maxCoreDrift.toFixed(2)} mV · window RMS ${results.windowConsensus.maxVectorRms.toFixed(2)} mV`
-                    : `Unstable · max core drift ${results.windowConsensus.maxCoreDrift.toFixed(2)} mV · window RMS ${results.windowConsensus.maxVectorRms.toFixed(2)} mV`
-                : 'Not enough rows for three windows';
+                    ? `Stable · median core SD ${results.windowConsensus.medianCoreStdDev.toFixed(2)} mV · max core drift ${results.windowConsensus.maxCoreDrift.toFixed(2)} mV · window RMS ${results.windowConsensus.maxVectorRms.toFixed(2)} mV`
+                    : `Unstable · median core SD ${results.windowConsensus.medianCoreStdDev.toFixed(2)} mV · max core drift ${results.windowConsensus.maxCoreDrift.toFixed(2)} mV · window RMS ${results.windowConsensus.maxVectorRms.toFixed(2)} mV`
+                : 'Not enough load duration for three windows';
             let clockTable = '';
             if (results.clockStretch?.available) {
                 clockTable = `

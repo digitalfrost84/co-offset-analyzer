@@ -269,11 +269,12 @@ function main() {
   unstableResults.recommendationGate = {
     state: 'unstable',
     actionable: false,
-    reason: 'Window drift is too high.'
+    reason: 'The load readings are still shifting. Leave the CO offsets unchanged, keep the same workload and HWiNFO logging running for another minute, then analyze the updated file.'
   };
   const unstable = render(api, unstableResults);
-  assert.match(unstable, /Hold and remeasure/);
-  assert.match(unstable, /Window drift is too high\./);
+  assert.match(unstable, /Keep measuring/);
+  assert.match(unstable, /keep the same workload and HWiNFO logging running for another minute/i);
+  assert.doesNotMatch(unstable, /Window drift is too high|Hold and remeasure/);
 
   const changedResults = baseResults();
   changedResults.maxDelta = 4.5;
