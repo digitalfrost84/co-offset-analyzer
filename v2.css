@@ -1,3 +1,219 @@
+/* Self-hosted fonts (SIL Open Font License): Inter 400–700 and Recursive Mono 400–700, latin subset. */
+@font-face {
+    font-family: "Inter";
+    font-style: normal;
+    font-weight: 400 700;
+    font-display: swap;
+    src: url("fonts/inter-latin.woff2") format("woff2");
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+    font-family: "Recursive";
+    font-style: normal;
+    font-weight: 400 700;
+    font-display: swap;
+    src: url("fonts/recursive-mono-latin.woff2") format("woff2");
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* Base structure */
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+}
+
+h1,
+h2,
+h3,
+p {
+    margin-top: 0;
+}
+
+h1 {
+    margin-bottom: 0;
+    line-height: 1.05;
+}
+
+h2 {
+    margin-bottom: 16px;
+    font-size: 22px;
+}
+
+h3 {
+    margin-bottom: 12px;
+    font-size: 16px;
+}
+
+.topbar {
+    display: flex;
+    justify-content: space-between;
+    gap: 20px;
+}
+
+.status-pill {
+    display: inline-flex;
+    align-items: center;
+    white-space: nowrap;
+}
+
+.layout {
+    display: grid;
+}
+
+.section:first-of-type {
+    border-top: 0;
+}
+
+.form-grid {
+    display: grid;
+}
+
+label {
+    display: block;
+}
+
+input[type="number"],
+input[type="file"],
+textarea,
+select {
+    width: 100%;
+    font: inherit;
+    outline: none;
+}
+
+textarea {
+    resize: vertical;
+}
+
+.button-row {
+    display: flex;
+    align-items: center;
+}
+
+.offset-inputs {
+    display: grid;
+}
+
+.offset-input input {
+    margin: 0;
+    text-align: center;
+}
+
+.actions {
+    display: grid;
+}
+
+button {
+    cursor: pointer;
+    font: inherit;
+}
+
+button:disabled {
+    cursor: wait;
+    opacity: 0.62;
+}
+
+.empty-state {
+    display: grid;
+}
+
+.empty-state p {
+    margin-bottom: 0;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+th,
+td {
+    padding: 10px 12px;
+    border-bottom: 1px solid;
+    text-align: right;
+    font-size: 13px;
+}
+
+th:first-child,
+td:first-child {
+    text-align: left;
+}
+
+th {
+    font-size: 11px;
+    text-transform: uppercase;
+}
+
+tr:last-child td {
+    border-bottom: 0;
+}
+
+.file-line {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+#fileName {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.progress-wrap {
+    display: grid;
+    gap: 7px;
+}
+
+.progress-wrap[hidden] {
+    display: none;
+}
+
+.progress-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.progress-detail {
+    min-width: 0;
+    overflow: hidden;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.progress-track {
+    overflow: hidden;
+}
+
+.progress-bar {
+    width: 0%;
+    height: 100%;
+    transition: width 0.14s ease;
+}
+
+.progress-wrap.indeterminate .progress-bar {
+    width: 40%;
+    animation: progress-sweep 1.15s ease-in-out infinite;
+}
+
+@keyframes progress-sweep {
+    from {
+        transform: translateX(-110%);
+    }
+
+    to {
+        transform: translateX(280%);
+    }
+}
+
+/* Theme */
 :root {
     color-scheme: light;
     --paper: #f3f1ea;
@@ -49,9 +265,6 @@ textarea {
     border-bottom: 1px solid var(--line);
 }
 
-.eyebrow {
-    display: none;
-}
 
 h1 {
     color: var(--ink);
@@ -352,9 +565,6 @@ button:active {
     padding: 0;
 }
 
-.empty-icon {
-    display: none;
-}
 
 .empty-state h2 {
     margin-bottom: 9px;
@@ -513,7 +723,7 @@ button:active {
 }
 
 .residual-axis {
-    min-height: 43px;
+    min-height: 48px;
     color: var(--muted);
     font-size: 11px;
 }
@@ -628,8 +838,7 @@ button:active {
 }
 
 .limits-v2 {
-    padding-bottom: 25px;
-    border-bottom: 1px solid var(--line);
+    padding-bottom: 4px;
 }
 
 .limit-row {
@@ -652,10 +861,12 @@ button:active {
 
 .result-actions-v2 {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 18px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 16px;
+    margin-bottom: 31px;
     padding-top: 20px;
+    border-top: 1px solid var(--line);
 }
 
 .next-step-kicker {
@@ -852,11 +1063,6 @@ th {
         margin-left: 184px;
     }
 
-    .result-actions-v2 {
-        align-items: flex-start;
-        flex-direction: column;
-    }
-
     .button-row {
         display: flex;
         grid-template-columns: none;
@@ -926,4 +1132,138 @@ th {
     * {
         scroll-behavior: auto;
     }
+}
+
+/* Layout fixes: keep residual values on one line, let the offset tiles use the full width,
+   and move the guide labels to a second row when the plot track gets narrow. */
+.residual-value {
+    white-space: nowrap;
+}
+
+.result-actions-v2 > div:first-child {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.axis-track {
+    container-type: inline-size;
+}
+
+.axis-mark.combined {
+    display: none;
+    top: 24px;
+}
+
+/* When the plot track is narrow the two guide labels would collide with the zero mark,
+   so show one combined label on a second line instead. */
+@container (max-width: 560px) {
+    .axis-mark.threshold:not(.combined) {
+        display: none;
+    }
+
+    .axis-mark.combined {
+        display: block;
+    }
+}
+
+/* Session progress strip */
+.pass-section {
+    margin-bottom: 30px;
+    padding-bottom: 22px;
+    border-bottom: 1px solid var(--line);
+}
+
+.pass-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.pass-head .result-label {
+    margin-bottom: 14px;
+}
+
+.pass-reset {
+    min-height: 28px;
+    padding: 0 10px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.pass-strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+    gap: 0 18px;
+}
+
+.pass-cell {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+    padding: 2px 0 6px;
+    color: var(--muted);
+    border-top: 1px solid var(--line-soft);
+}
+
+.pass-cell.open {
+    color: var(--ink);
+    border-top-color: var(--ink);
+}
+
+.pass-label {
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.pass-value {
+    color: inherit;
+    font-family: var(--font-mono);
+    font-variation-settings: "MONO" 1, "CASL" 0;
+    font-size: 20px;
+    font-weight: 520;
+    white-space: nowrap;
+}
+
+.pass-cell.open .pass-value {
+    color: var(--ink);
+}
+
+.pass-bar {
+    display: block;
+    height: 3px;
+    background: var(--line-soft);
+}
+
+.pass-bar i {
+    display: block;
+    height: 100%;
+    background: var(--muted);
+}
+
+.pass-cell.open .pass-bar i {
+    background: var(--accent);
+}
+
+.pass-cell small {
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pass-note {
+    margin: 12px 0 0;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.result-actions-v2 .button-row {
+    justify-content: flex-start;
+}
+
+.result-actions-v2 .button-row button {
+    white-space: nowrap;
 }

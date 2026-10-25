@@ -4,7 +4,7 @@ A single-file browser tool for producing per-core AMD Ryzen Curve Optimizer reco
 
 The analyzer runs entirely in your browser. CSV data is processed locally and is not uploaded anywhere.
 
-`index.html` is the current V2 interface. The historical V1 interface is available as [`index-v1.html`](https://raw.githubusercontent.com/digitalfrost84/co-offset-analyzer/main/index-v1.html), and both interfaces use the same harmonization engine. To keep V2 locally, download `index.html` together with `v2.css` into the same folder.
+`index.html` is the current interface. The historical V1 interface is kept as [`index-v1.html`](https://raw.githubusercontent.com/digitalfrost84/co-offset-analyzer/main/index-v1.html) with the engine as it was in July 2026; `index.html` has since gained the time-aware convergence analysis. To use the analyzer locally, download `index.html`, `v2.css` and the `fonts/` folder together; the fonts (Inter and Recursive, SIL Open Font License) are self-hosted so nothing is fetched from the network.
 
 The harmonizer targets the relative per-core VID requests observed during the same loaded samples. It predicts how each legal whole-step CO move changes the residual field, then selects the fewest core changes that can bring each CPU/CCD group inside the configured mV-per-step target. A small hysteresis margin prevents dots sitting only just beyond a guide from starting another correction pass.
 
@@ -17,7 +17,7 @@ The harmonizer targets the relative per-core VID requests observed during the sa
 - Produces copy-friendly per-core CO recommendations
 - Uses one shared, bidirectional, offset-aware harmonization engine in V1 and V2
 - Flags probable per-core clock stretching from reported-vs-effective clock gaps
-- Works offline as a standalone `index.html`
+- Works fully offline from a local folder; no network requests, no telemetry
 
 ## Quick Start
 
@@ -64,6 +64,14 @@ For a direct recommendation:
 1. Apply the complete calculated profile shown by the tool.
 2. Ignore one-step changes unless the same core repeats the same direction in a fresh matched log.
 3. Stop the VID-alignment experiment when the tool shows no harmonization movement, then perform separate stability testing.
+
+## Passes And The Session Report
+
+Each analyzed log is one pass. When you click `I applied them`, the pass is closed: its spread and the applied offsets are recorded, the applied offsets become the entered values for the next log, the old CSV is cleared, and the result panel waits for the fresh log. `Undo` reopens the pass if you clicked too early.
+
+From the second pass on, a Progress strip shows the spread of every pass on one scale, and the residual plot keeps the scale of the earlier passes so the dots visibly walk into the band. When a pass converges, the headline becomes the session result (for example `Converged after 3 passes`) and `Copy report` puts a plain-text summary on the clipboard: CPU, one line per pass, the spread reduction, the measured mV-per-step response when it can be derived from unchanged reference cores, and the final offsets.
+
+The session lives in your browser's local storage only. `New session` in the Progress strip clears it; nothing is uploaded.
 
 ## HWiNFO64 Logging Tips
 

@@ -6,7 +6,7 @@ const vm = require('node:vm');
 const root = path.resolve(__dirname, '..', '..');
 const rootPath = path.join(root, 'index.html');
 const v1Path = path.join(root, 'index-v1.html');
-const v2Path = path.join(root, 'index-v2.html');
+const v2Path = rootPath;
 const cssPath = path.join(root, 'v2.css');
 
 class TestElement {
@@ -86,9 +86,9 @@ function loadV2Renderer() {
   context.window = context;
   context.globalThis = context;
   vm.runInNewContext(
-    `${scripts[0]}\nglobalThis.__v2 = { displayResultsV2, showErrorV2, refreshRecommendationsFromCurrentOffsets, calculateOffsets, document };`,
+    `${scripts[0]}\nglobalThis.__v2 = { displayResultsV2, showErrorV2, refreshRecommendationsFromCurrentOffsets, calculateOffsets, document, useRecommendationsAsCurrent, undoClosePass, startNewSession, getSession, buildSessionReportText };`,
     context,
-    { filename: 'index-v2.html' }
+    { filename: 'index.html' }
   );
   return context.__v2;
 }
@@ -191,11 +191,9 @@ function assertStaticContract(html) {
 }
 
 function main() {
-  const rootHtml = fs.readFileSync(rootPath, 'utf8');
   const v1Html = fs.readFileSync(v1Path, 'utf8');
   const html = fs.readFileSync(v2Path, 'utf8');
   const css = fs.readFileSync(cssPath, 'utf8');
-  assert.equal(rootHtml, html, 'Pages root must publish the V2 interface');
   assert.match(v1Html, /<title>CO Offset Analyzer<\/title>/, 'the original V1 interface must remain available');
   assert.match(v1Html, /function calculateOffsets\(vidMeans, referenceMeans, mvStep, currentOffsets, residualRange, groups = null\)/, 'V1 must retain the shared field harmonizer');
   assert.match(html, /<title>CO Offset Analyzer — V2<\/title>/);
@@ -208,7 +206,10 @@ function main() {
   assert.match(html, /if \(magnitude <= actionThreshold \+ 1e-9\) return 0/);
   assert.match(html, /CO offsets used for this log/);
   assert.match(html, /Enter the values that were active while this CSV was recorded\./);
-  assert.match(html, /family=Inter:wght@400\.\.700&amp;family=Recursive:MONO,wght@1,400\.\.700/);
+  assert.doesNotMatch(html, /fonts\.googleapis\.com|fonts\.gstatic\.com/, 'fonts must be self-hosted, not fetched from Google');
+  assert.match(css, /@font-face[\s\S]*url\("fonts\/inter-latin\.woff2"\)/, 'Inter must be self-hosted from fonts/');
+  assert.match(css, /@font-face[\s\S]*url\("fonts\/recursive-mono-latin\.woff2"\)/, 'Recursive must be self-hosted from fonts/');
+  assert.ok(fs.existsSync(path.join(root, 'fonts', 'inter-latin.woff2')) && fs.existsSync(path.join(root, 'fonts', 'recursive-mono-latin.woff2')), 'font files must ship in fonts/');
   assert.match(css, /--accent:\s*#d58f0b/i);
   assert.match(css, /--font-sans:\s*"Inter"/);
   assert.match(css, /--font-mono:\s*"Recursive"/);
@@ -344,7 +345,56 @@ function main() {
   api.showErrorV2(errorContainer, 'Bad input');
   assert.match(errorContainer.innerHTML, /role="alert"/);
 
-  console.log('PASS Pages root publishes V2');
+
+  // Session ledger: "I applied them" closes the pass, the next log reports progress.
+  api.startNewSession();
+  const ledgerPassOne = render(api, changedResults);
+  assert.match(ledgerPassOne, /1 offset to apply/);
+  assert.doesNotMatch(ledgerPassOne, /class="pass-section"/, 'a first pass has no progress strip yet');
+  api.document.getElementById('csvText').value = 'Date,Time\n';
+  api.useRecommendationsAsCurrent();
+  const waiting = api.document.getElementById('results').innerHTML;
+  assert.match(waiting, /Pass 2 · waiting for a fresh log/, 'closing a pass must show the waiting state');
+  assert.match(waiting, /C3 at -\d+<\/strong><small>applied/, 'the waiting state lists the applied offsets');
+  assert.match(waiting, /Pass 1/, 'the waiting state shows the closed pass');
+  assert.match(waiting, /applied C3/, 'the strip names the applied cores');
+  assert.match(waiting, /onclick="undoClosePass\(\)"/, 'a just-closed pass can be undone');
+  assert.doesNotMatch(waiting, /Set C3 to -2|offsets to apply/, 'closing a pass must not re-score the same log');
+  assert.equal(api.getSession().passes.length, 1);
+  assert.equal(api.getSession().pending.offsets[3], changedResults.recommendations[3], 'the applied offsets are the rendered recommendation');
+  assert.equal(api.document.getElementById('csvText').value, '', 'closing a pass clears the analysed CSV');
+
+  const ledgerDone = baseResults();
+  ledgerDone.sourceName = 'pass2.csv';
+  ledgerDone.currentOffsets = { ...ledgerDone.currentOffsets, 3: -1 };
+  ledgerDone.recommendations = { ...ledgerDone.recommendations, 3: -1 };
+  const converged = render(api, ledgerDone);
+  assert.match(converged, /Converged after 2 passes/, 'a converged pass with history becomes the report headline');
+  assert.match(converged, /Spread [0-9.]+ → [0-9.]+ mV \([−+][0-9]+ %\) across 2 passes\./);
+  assert.match(converged, /class="pass-section"/);
+  assert.match(converged, /Pass 1[\s\S]*Pass 2/);
+  assert.match(converged, /onclick="copySessionReport\(\)">Copy report/);
+  assert.match(converged, /Scale is shared with the earlier passes/);
+  assert.doesNotMatch(converged, /I applied them/);
+  const report = api.buildSessionReportText(api.getSession().current);
+  assert.match(report, /^CO Offset Analyzer – session report/);
+  assert.match(report, /Pass 1 · [^\n]*applied C3 -\d+/);
+  assert.match(report, /Pass 2 · pass2\.csv · spread [0-9.]+ mV · converged/);
+  assert.match(report, /Final offsets:\nCore 0: 0\n[\s\S]*Core 3: -1/);
+  assert.match(report, /not a stability result/);
+
+  api.startNewSession();
+  assert.equal(api.getSession().passes.length, 0);
+  render(api, changedResults);
+  api.useRecommendationsAsCurrent();
+  assert.equal(api.getSession().passes.length, 1);
+  api.undoClosePass();
+  assert.equal(api.getSession().passes.length, 0, 'undo reopens the pass');
+  assert.equal(api.getSession().pending, null);
+  assert.match(api.document.getElementById('results').innerHTML, /1 offset to apply/, 'undo restores the closed result');
+  api.startNewSession();
+
+  console.log('PASS index.html publishes V2');
   console.log('PASS V2 DOM contract');
   console.log('PASS V1 and V2 shared harmonizer');
   console.log('PASS V2 no-change renderer');
@@ -352,6 +402,7 @@ function main() {
   console.log('PASS V2 live current-offset recomputation');
   console.log('PASS V2 gated renderer');
   console.log('PASS V2 alert semantics');
+  console.log('PASS V2 session ledger');
 }
 
 main();
